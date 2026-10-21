@@ -1,0 +1,14 @@
+eclipse.preferences.version=1
+ldfile.code.location=FLASH
+ldfile.envm.Origin=
+ldfile.envm.length=
+ldfile.flash.Origin=0x08000000
+ldfile.flash.length=32
+ldfile.ram.Origin=0x20000000
+ldfile.ram.length=6
+ldfile.src.path=D\:/GD32EB_v1.5.11_Rel/GD32EB_v1.5.11_Rel/GD32EB/plugins/com.gigadevice.templatefwlib.arm.gd32e23x_1.0.0.202607240330/Firmware\\gd32e23x_flash.ld
+ldfile.stack.Origin=0x20001800
+ldfile.stack.length=1
+ldfile.target.path=D\:\\GD32EB_v1.5.11_Rel\\GD32EB_v1.5.11_Rel\\GD32EB\\workspace\\Hall_Senser\\gd32e23x_flash.ld
+mcu.target=GD32E230G6U6TR
+mcu.target.svd=GD32E23x.svd
