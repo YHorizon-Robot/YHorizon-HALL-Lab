@@ -1,106 +1,82 @@
 /*!
     \file    main.c
-    \brief   led spark with systick, USART print and key example
+    \brief   三路霍尔角度通过 RTT 输出
 
-    \version 2026-02-04, V2.5.0, firmware for GD32E23x
-*/
-
-/*
-    Copyright (c) 2026, GigaDevice Semiconductor Inc.
-
-    Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
-
-    1. Redistributions of source code must retain the above copyright notice, this
-       list of conditions and the following disclaimer.
-    2. Redistributions in binary form must reproduce the above copyright notice,
-       this list of conditions and the following disclaimer in the documentation
-       and/or other materials provided with the distribution.
-    3. Neither the name of the copyright holder nor the names of its contributors
-       may be used to endorse or promote products derived from this software without
-       specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
-IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
-INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
-NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
-OF SUCH DAMAGE.
+    每 50 ms 打一行：
+      adc <U1> <U2> <U4> ang <度.百分度> amp <峰值>
+    amp 太小会额外带 weak，表示磁铁不在有效范围内，角度会乱跳。
+    PB4 驱动状态灯，低电平点亮，约 500 ms 翻转一次。
+    PB5 是 RS485 方向，保持低电平，收发器停在接收。
 */
 
 #include "gd32e23x.h"
 #include "systick.h"
-#include <stdio.h>
-#include "main.h"
-#include "gd32e230c_eval.h"
+#include "hall_encoder.h"
+#include "SEGGER_RTT.h"
 
 /*!
-    \brief      toggle the led every 500ms
+    \brief      状态灯和 RS485 方向脚
     \param[in]  none
     \param[out] none
     \retval     none
 */
-void led_spark(void)
+static void board_gpio_init(void)
 {
-    static __IO uint32_t timingdelaylocal = 0U;
+    rcu_periph_clock_enable(RCU_GPIOB);
 
-    if(timingdelaylocal) {
+    gpio_mode_set(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_4 | GPIO_PIN_5);
+    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_4 | GPIO_PIN_5);
+    gpio_bit_set(GPIOB, GPIO_PIN_4);
+    gpio_bit_reset(GPIOB, GPIO_PIN_5);
+}
 
-        if(timingdelaylocal < 500U) {
-            gd_eval_led_on(LED1);
-        } else {
-            gd_eval_led_off(LED1);
-        }
+/*!
+    \brief      把一帧霍尔结果打到 RTT
+    \param[in]  sample: 原码和角度
+    \param[out] none
+    \retval     none
+*/
+static void hall_rtt_print(const hall_sample_t *sample)
+{
+    int32_t whole = sample->angle_cdeg / 100;
+    int32_t frac = sample->angle_cdeg % 100;
 
-        timingdelaylocal--;
+    if(sample->amplitude < HALL_AMP_WEAK) {
+        SEGGER_RTT_printf(0, "adc %u %u %u ang %d.%02d amp %d weak\r\n",
+                          (unsigned)sample->raw[0], (unsigned)sample->raw[1], (unsigned)sample->raw[2],
+                          (int)whole, (int)frac, (int)sample->amplitude);
     } else {
-        timingdelaylocal = 1000U;
+        SEGGER_RTT_printf(0, "adc %u %u %u ang %d.%02d amp %d\r\n",
+                          (unsigned)sample->raw[0], (unsigned)sample->raw[1], (unsigned)sample->raw[2],
+                          (int)whole, (int)frac, (int)sample->amplitude);
     }
 }
 
 /*!
-    \brief      main function
+    \brief      应用入口
     \param[in]  none
     \param[out] none
-    \retval     none
+    \retval     不返回
 */
-
 int main(void)
 {
-#ifdef __FIRMWARE_VERSION_DEFINE
-    uint32_t fw_ver = 0U;
-#endif
-    /* configure systick */
+    hall_sample_t sample;
+    uint32_t beat = 0U;
+
     systick_config();
-    /* initialize the LEDs, USART and key */
-    gd_eval_led_init(LED1);
-    gd_eval_led_init(LED2);
-    gd_eval_led_init(LED3);
-    gd_eval_com_init(EVAL_COM);
-    gd_eval_key_init(KEY_WAKEUP, KEY_MODE_GPIO);
-
-#ifdef __FIRMWARE_VERSION_DEFINE
-    fw_ver = gd32e23x_firmware_version_get();
-    /* print firmware version */
-    printf("\r\nGD32E23x series firmware version: V%d.%d.%d", (uint8_t)(fw_ver >> 24U), (uint8_t)(fw_ver >> 16U), (uint8_t)(fw_ver >> 8U));
-#endif /* __FIRMWARE_VERSION_DEFINE */
-
-    /* print out the clock frequency of system, AHB, APB1 and APB2 */
-    printf("\r\nCK_SYS is %d", rcu_clock_freq_get(CK_SYS));
-    printf("\r\nCK_AHB is %d", rcu_clock_freq_get(CK_AHB));
-    printf("\r\nCK_APB1 is %d", rcu_clock_freq_get(CK_APB1));
-    printf("\r\nCK_APB2 is %d", rcu_clock_freq_get(CK_APB2));
+    SEGGER_RTT_Init();
+    SEGGER_RTT_printf(0, "hall encoder U1 U2 U4\r\n");
+    board_gpio_init();
+    hall_encoder_init();
 
     while(1) {
-        if(SET == gd_eval_key_state_get(KEY_WAKEUP)) {
-            gd_eval_led_on(LED2);
-            delay_1ms(500U);
-            gd_eval_led_off(LED2);
-            gd_eval_led_toggle(LED3);
+        hall_encoder_read(&sample);
+        hall_rtt_print(&sample);
+
+        beat++;
+        if(0U == (beat % 10U)) {
+            gpio_bit_toggle(GPIOB, GPIO_PIN_4);
         }
+        delay_1ms(50U);
     }
 }

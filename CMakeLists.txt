@@ -41,10 +41,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${GD32_CMSIS}/GD/GD32E23x/Source/syscalls.c
     ${HALL_SPL_SOURCES}
     ${HALL_APP_SOURCES}
+    RTT/SEGGER_RTT.c
+    RTT/SEGGER_RTT_printf.c
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     inc
+    RTT
     ${GD32_CMSIS}
     ${GD32_CMSIS}/GD/GD32E23x/Include
     ${GD32_SPL}/Include
