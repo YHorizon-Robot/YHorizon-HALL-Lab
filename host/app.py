@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -109,12 +110,17 @@ class Dial(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.angle = 0.0
+        self.linear = False
         self.setMinimumSize(150, 150)
         self.setMaximumHeight(168)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_angle(self, degrees: float) -> None:
         self.angle = degrees % 360.0
+        self.update()
+
+    def set_linear(self, linear: bool) -> None:
+        self.linear = linear
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -136,11 +142,15 @@ class Dial(QWidget):
         painter.setPen(QColor("#9aa3b2"))
         font = QFont("Microsoft YaHei UI", 8)
         painter.setFont(font)
-        for mark in range(0, 360, 30):
+        if self.linear:
+            labels = ((0, "+20"), (90, "0"), (180, "-20"))
+        else:
+            labels = tuple((mark, str(mark)) for mark in range(0, 360, 30))
+        for mark, text in labels:
             rad = math.radians(mark)
             x = math.cos(rad) * (radius - 28)
             y = -math.sin(rad) * (radius - 28)
-            painter.drawText(int(x - 14), int(y - 8), 28, 16, int(Qt.AlignmentFlag.AlignCenter), str(mark))
+            painter.drawText(int(x - 18), int(y - 8), 36, 16, int(Qt.AlignmentFlag.AlignCenter), text)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#b6f25c"))
         painter.rotate(-self.angle)
@@ -168,6 +178,7 @@ class TraceStore:
         self.last_t = 0.0
         self.unwrap = 0.0
         self.rpm = 0.0
+        self.linear = False
         self.latest: busmod.Sample | None = None
         self.rate_times: deque[float] = deque(maxlen=240)
 
@@ -180,25 +191,37 @@ class TraceStore:
         self.rate_times.clear()
 
     def add(self, sample: busmod.Sample) -> None:
-        deg = (sample.angle_cdeg % 36000) / 100.0
-        if not self.primed:
+        if self.linear:
+            deg = sample.angle_cdeg / 100.0
+            if self.primed:
+                dt = sample.t - self.last_t
+                if 0.0004 < dt < 0.5:
+                    inst = (deg - self.last_deg) / dt
+                    self.rpm += 0.2 * (inst - self.rpm)
             self.unwrap = deg
             self.last_deg = deg
             self.last_t = sample.t
             self.primed = True
         else:
-            delta = deg - self.last_deg
-            if delta > 180.0:
-                delta -= 360.0
-            elif delta < -180.0:
-                delta += 360.0
-            dt = sample.t - self.last_t
-            self.unwrap += delta
-            if 0.0004 < dt < 0.5:
-                inst = (delta / 360.0) / dt * 60.0
-                self.rpm += 0.2 * (inst - self.rpm)
-            self.last_deg = deg
-            self.last_t = sample.t
+            deg = (sample.angle_cdeg % 36000) / 100.0
+            if not self.primed:
+                self.unwrap = deg
+                self.last_deg = deg
+                self.last_t = sample.t
+                self.primed = True
+            else:
+                delta = deg - self.last_deg
+                if delta > 180.0:
+                    delta -= 360.0
+                elif delta < -180.0:
+                    delta += 360.0
+                dt = sample.t - self.last_t
+                self.unwrap += delta
+                if 0.0004 < dt < 0.5:
+                    inst = (delta / 360.0) / dt * 60.0
+                    self.rpm += 0.2 * (inst - self.rpm)
+                self.last_deg = deg
+                self.last_t = sample.t
         slot = self.i
         self.t[slot] = sample.t
         self.raw[0, slot] = sample.raw[0]
@@ -267,12 +290,13 @@ def style_plot(plot: pg.PlotWidget, ylabel: str) -> None:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("霍尔编码器上位机")
+        self.setWindowTitle("霍尔传感器上位机")
         self.resize(1280, 780)
         self.bus = busmod.Bus()
         self.bus.start()
         self.store = TraceStore()
         self.connected = False
+        self.kind = busmod.TYPE_ENCODER
         self.streaming = False
         self.demo_on = False
         self.demo_theta = 0.0
@@ -323,8 +347,9 @@ class MainWindow(QMainWindow):
         self.dev_id.setRange(1, 254)
         self.dev_id.setValue(1)
         self.dev_type = QComboBox()
+        self.dev_type.addItem("不限", busmod.TYPE_ANY)
         self.dev_type.addItem("角度编码器", busmod.TYPE_ENCODER)
-        self.dev_type.addItem("位置传感器", busmod.TYPE_POSITION)
+        self.dev_type.addItem("直线位置", busmod.TYPE_POSITION)
         self.btn_link = QPushButton("连接")
         self.btn_link.setObjectName("primary")
         self.btn_link.clicked.connect(self._toggle_link)
@@ -409,8 +434,18 @@ class MainWindow(QMainWindow):
         cap_grid.addWidget(note, 7, 0, 1, 2)
         layout.addWidget(cap)
 
-        cal = QGroupBox("零点与校准")
+        cal = QGroupBox("模式、零点与校准")
         cal_layout = QGridLayout(cal)
+        self.btn_profile = QPushButton("切换为直线位置")
+        self.btn_profile.clicked.connect(self._toggle_profile)
+        self.sigma = QDoubleSpinBox()
+        self.sigma.setRange(2.0, 30.0)
+        self.sigma.setSingleStep(0.5)
+        self.sigma.setDecimals(1)
+        self.sigma.setValue(8.0)
+        self.sigma.setSuffix(" mm")
+        self.btn_sigma = QPushButton("写宽度")
+        self.btn_sigma.clicked.connect(self._write_sigma)
         self.btn_zero = QPushButton("当前位置设为 0°")
         self.btn_zero.clicked.connect(lambda: self.bus.submit("zero"))
         self.btn_clear_zero = QPushButton("清除零点")
@@ -421,15 +456,18 @@ class MainWindow(QMainWindow):
         self.btn_cal_end.clicked.connect(lambda: self.bus.submit("cal_end"))
         self.btn_cal_clear = QPushButton("清除校准")
         self.btn_cal_clear.clicked.connect(lambda: self.bus.submit("cal_clear"))
-        self.cal_label = QLabel("校准前把磁铁转满至少一圈")
+        self.cal_label = QLabel("角度模式先转满一圈。直线模式先把磁铁拿开，再采基线。")
         self.cal_label.setWordWrap(True)
         self.cal_label.setObjectName("muted")
-        cal_layout.addWidget(self.btn_zero, 0, 0, 1, 2)
-        cal_layout.addWidget(self.btn_clear_zero, 1, 0)
-        cal_layout.addWidget(self.btn_cal_clear, 1, 1)
-        cal_layout.addWidget(self.btn_cal_begin, 2, 0)
-        cal_layout.addWidget(self.btn_cal_end, 2, 1)
-        cal_layout.addWidget(self.cal_label, 3, 0, 1, 2)
+        cal_layout.addWidget(self.btn_profile, 0, 0, 1, 2)
+        cal_layout.addWidget(self.sigma, 1, 0)
+        cal_layout.addWidget(self.btn_sigma, 1, 1)
+        cal_layout.addWidget(self.btn_zero, 2, 0, 1, 2)
+        cal_layout.addWidget(self.btn_clear_zero, 3, 0)
+        cal_layout.addWidget(self.btn_cal_clear, 3, 1)
+        cal_layout.addWidget(self.btn_cal_begin, 4, 0)
+        cal_layout.addWidget(self.btn_cal_end, 4, 1)
+        cal_layout.addWidget(self.cal_label, 5, 0, 1, 2)
         layout.addWidget(cal)
 
         device = QGroupBox("设备参数")
@@ -536,6 +574,9 @@ class MainWindow(QMainWindow):
         if self.streaming or self.demo_on:
             if self.demo_on:
                 self.demo_on = False
+                self.store.linear = self.kind == busmod.TYPE_POSITION
+                self.store.clear()
+                self._dirty = True
                 self._sync_buttons()
                 self._log("停止演示")
             if self.streaming:
@@ -545,6 +586,7 @@ class MainWindow(QMainWindow):
         self._dirty = True
         if self.demo.isChecked():
             self.demo_on = True
+            self.store.linear = False
             self.demo_theta = 0.0
             self.demo_next = time.perf_counter()
             self._sync_buttons()
@@ -556,8 +598,20 @@ class MainWindow(QMainWindow):
         mode = self.stream_mode.currentData()
         self.bus.submit("stream", mode, self.period.value())
 
+    def _toggle_profile(self) -> None:
+        target = busmod.TYPE_ENCODER if self.kind == busmod.TYPE_POSITION else busmod.TYPE_POSITION
+        if target == busmod.TYPE_POSITION:
+            self._log("切换后把磁铁拿开，点开始校准再结束，采集零磁场基线。")
+        self.bus.submit("set_profile", target)
+
+    def _write_sigma(self) -> None:
+        self.bus.submit("set_sigma", int(round(self.sigma.value() * 1000)))
+
     def _cal_begin(self) -> None:
-        self.cal_label.setText("正在记录。请把磁铁匀速转满至少一圈，再点结束校准。")
+        if self.kind == busmod.TYPE_POSITION:
+            self.cal_label.setText("正在采集零磁场基线。确认磁铁已经拿开，再点结束校准。")
+        else:
+            self.cal_label.setText("正在记录。请把磁铁匀速转满至少一圈，再点结束校准。")
         self.bus.submit("cal_begin")
 
     def _factory(self) -> None:
@@ -579,7 +633,11 @@ class MainWindow(QMainWindow):
             return
         self.csv_file = open(path, "w", newline="", encoding="utf-8")
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(["t_s", "angle_deg", "amplitude", "u1", "u2", "u4", "flags", "rpm"])
+        if self.store.linear:
+            header = ["t_s", "position_mm", "amplitude", "u1", "u2", "u4", "flags", "mm_s"]
+        else:
+            header = ["t_s", "angle_deg", "amplitude", "u1", "u2", "u4", "flags", "rpm"]
+        self.csv_writer.writerow(header)
         self.btn_csv.setText("停止录制")
         self._log(f"正在写入 {path}")
 
@@ -643,18 +701,51 @@ class MainWindow(QMainWindow):
                 self.stream_mode.setCurrentIndex(1 if int(event[1]) == busmod.MODE_REPORT else 0)
                 self.period.setValue(int(event[2]))
             elif kind == "zero":
-                self.cal_label.setText(f"机械零点偏移 {int(event[1]) / 100:.2f}°")
+                zero = int(event[1]) / 100.0
+                if self.kind == busmod.TYPE_POSITION:
+                    self.cal_label.setText(f"机械零点偏移 {zero:.2f} mm")
+                else:
+                    self.cal_label.setText(f"机械零点偏移 {zero:.2f}°")
+            elif kind == "sigma":
+                self.sigma.setValue(int(event[1]) / 1000.0)
             elif kind == "cal":
                 offsets, gains = event[1], event[2]
-                gain_text = " / ".join(f"{g / 4096:.3f}" for g in gains)
-                off_text = " / ".join(str(v) for v in offsets)
-                self.cal_label.setText(f"偏置 {off_text}\n增益 {gain_text}")
+                flags = int(event[3]) if len(event) > 3 else 0
+                if self.kind == busmod.TYPE_POSITION:
+                    self.sigma.setValue(gains[0] / 1000.0)
+                    if flags & 2:
+                        off_text = " / ".join(str(v) for v in offsets)
+                        self.cal_label.setText(f"基线 {off_text}\n敏感宽度 {gains[0] / 1000:.1f} mm")
+                    else:
+                        self.cal_label.setText(f"尚未采集基线，当前按 2048 估算\n敏感宽度 {gains[0] / 1000:.1f} mm")
+                else:
+                    gain_text = " / ".join(f"{g / 4096:.3f}" for g in gains)
+                    off_text = " / ".join(str(v) for v in offsets)
+                    self.cal_label.setText(f"偏置 {off_text}\n增益 {gain_text}")
             elif kind == "factory":
                 self.dev_id.setValue(int(event[1]))
                 self.new_id.setValue(int(event[1]))
                 self._select_baud(int(event[2]))
                 self.stream_mode.setCurrentIndex(0)
                 self.period.setValue(20)
+
+    def _apply_kind(self, dev_type: int) -> None:
+        linear = dev_type == busmod.TYPE_POSITION
+        if linear != self.store.linear and not self.demo_on:
+            self.store.linear = linear
+            self.store.clear()
+            self._dirty = True
+            self._wrap_applied = not self.wrap.isChecked()
+        self.kind = dev_type if dev_type in (busmod.TYPE_ENCODER, busmod.TYPE_POSITION) else busmod.TYPE_ENCODER
+        self.dial.set_linear(linear and not self.demo_on)
+        self.btn_profile.setText("切换为角度编码器" if linear else "切换为直线位置")
+        self.btn_zero.setText("当前位置设为 0 mm" if linear else "当前位置设为 0°")
+        self.wrap.setEnabled(not linear)
+        style = {"color": "#c5c8ce", "font-family": "Microsoft YaHei UI", "font-size": "12px"}
+        if linear:
+            self.plot_angle.setLabel("left", "位置", units="mm", **style)
+        else:
+            self.plot_angle.setLabel("left", "角度", units="°", **style)
 
     def _show_info(self, info: busmod.DeviceInfo) -> None:
         self.dev_id.setValue(info.dev_id)
@@ -663,9 +754,17 @@ class MainWindow(QMainWindow):
             self._select_baud(busmod.BAUD_TABLE[info.baud_index])
         self.stream_mode.setCurrentIndex(1 if info.mode == busmod.MODE_REPORT else 0)
         self.period.setValue(info.report_ms)
+        self._apply_kind(info.dev_type)
         mode = "主动上报" if info.mode == busmod.MODE_REPORT else "主从"
         cal = "已校准" if info.cal_valid else "未校准"
-        self.flags.setText(f"固件 {info.fw >> 8}.{info.fw & 0xFF}   {mode}   {cal}   零点 {info.zero_cdeg / 100:.2f}°")
+        if info.dev_type == busmod.TYPE_POSITION:
+            name = "直线位置"
+            zero = f"{info.zero_cdeg / 100:.2f} mm"
+        else:
+            name = "角度编码器"
+            zero = f"{info.zero_cdeg / 100:.2f}°"
+        self.flags.setText(f"{name}   固件 {info.fw >> 8}.{info.fw & 0xFF}   {mode}   {cal}   零点 {zero}")
+        self._sync_buttons()
 
     def _select_baud(self, baud: int) -> None:
         index = busmod.BAUD_TABLE.index(baud) if baud in busmod.BAUD_TABLE else 4
@@ -686,9 +785,13 @@ class MainWindow(QMainWindow):
     def _take_sample(self, sample: busmod.Sample) -> None:
         self.store.add(sample)
         if self.csv_writer is not None:
+            if self.store.linear:
+                reading = sample.angle_cdeg / 100.0
+            else:
+                reading = (sample.angle_cdeg % 36000) / 100.0
             self.csv_writer.writerow([
                 f"{sample.t:.6f}",
-                f"{(sample.angle_cdeg % 36000) / 100:.2f}",
+                f"{reading:.2f}",
                 sample.amplitude,
                 sample.raw[0],
                 sample.raw[1],
@@ -726,13 +829,21 @@ class MainWindow(QMainWindow):
 
     def _draw(self) -> None:
         latest = self.store.latest
+        linear = self.store.linear and not self.demo_on
         if latest is not None:
-            deg = (latest.angle_cdeg % 36000) / 100.0
-            self.dial.set_angle(deg)
-            self.angle_label.setText(f"{deg:.2f}°")
+            if linear:
+                mm = latest.angle_cdeg / 100.0
+                clamped = max(-20.0, min(20.0, mm))
+                self.dial.set_angle(90.0 - clamped / 20.0 * 90.0)
+                self.angle_label.setText(f"{mm:.2f} mm")
+                self.rpm_label.setText(f"{self.store.rpm:+.1f} mm/s")
+            else:
+                deg = (latest.angle_cdeg % 36000) / 100.0
+                self.dial.set_angle(deg)
+                self.angle_label.setText(f"{deg:.2f}°")
+                self.rpm_label.setText(f"{self.store.rpm:+.1f} RPM")
             weak = bool(latest.flags & 1)
             self.angle_label.setStyleSheet("color: #ff6b6b;" if weak else "color: #f4f7fb;")
-            self.rpm_label.setText(f"{self.store.rpm:+.1f} RPM")
             self.detail.setText(
                 f"幅度 {latest.amplitude}    U1 {latest.raw[0]}    U2 {latest.raw[1]}    U4 {latest.raw[2]}"
             )
@@ -743,9 +854,11 @@ class MainWindow(QMainWindow):
                 parts.append("已校准")
             if latest.flags & 4:
                 parts.append("校准中")
+            if latest.flags & 8:
+                parts.append("超出阵列")
             if parts:
                 self.flags.setText("  ".join(parts))
-        view = self.store.visible(float(self.span.currentData()), self.wrap.isChecked())
+        view = self.store.visible(float(self.span.currentData()), self.wrap.isChecked() and not linear)
         if view is None:
             for curve in self.curves:
                 curve.setData([], [])
@@ -784,10 +897,13 @@ class MainWindow(QMainWindow):
         self.btn_stream.setText("停止采集" if running else "开始采集")
         online = self.connected and not self.demo_on
         for button in (
-            self.btn_zero, self.btn_clear_zero, self.btn_cal_begin, self.btn_cal_end,
-            self.btn_cal_clear, self.btn_id, self.btn_baud, self.btn_info, self.btn_factory,
+            self.btn_profile, self.btn_sigma, self.btn_zero, self.btn_clear_zero,
+            self.btn_cal_begin, self.btn_cal_end, self.btn_cal_clear,
+            self.btn_id, self.btn_baud, self.btn_info, self.btn_factory,
         ):
             button.setEnabled(online)
+        self.sigma.setEnabled(online and self.kind == busmod.TYPE_POSITION)
+        self.btn_sigma.setEnabled(online and self.kind == busmod.TYPE_POSITION)
         self.port.setEnabled(not self.connected)
         self.baud.setEnabled(not self.connected)
         self.btn_refresh.setEnabled(not self.connected)

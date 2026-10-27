@@ -296,13 +296,18 @@ static void hall_cal_note(const uint16_t raw[3])
     }
 }
 
+void hall_encoder_copy_raw(uint16_t raw[3])
+{
+    raw[0] = s_adc_dma[0];
+    raw[1] = s_adc_dma[1];
+    raw[2] = s_adc_dma[2];
+}
+
 void hall_encoder_read(hall_sample_t *sample)
 {
     uint16_t raw[HALL_ADC_COUNT];
 
-    raw[0] = s_adc_dma[0];
-    raw[1] = s_adc_dma[1];
-    raw[2] = s_adc_dma[2];
+    hall_encoder_copy_raw(raw);
     hall_cal_note(raw);
     hall_solve(raw, sample);
 }

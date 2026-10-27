@@ -7,6 +7,7 @@
 
 #include "gd32e23x.h"
 #include "hall_encoder.h"
+#include "hall_line.h"
 #include "systick.h"
 
 #include <stddef.h>
@@ -39,12 +40,13 @@ typedef struct {
     uint16_t zero_cdeg;
     int16_t offset[3];
     uint16_t gain_q12[3];
-    uint16_t reserved;
-    uint16_t reserved2;
+    uint16_t profile;          /*!< 0 或 1 为角度，2 为直线。旧固件这里是 0 */
+    int16_t line_zero_cmm;     /*!< 直线零点，0.01 mm。旧固件这里是 0 */
 } rs485_cfg_t;
 
 _Static_assert(sizeof(rs485_cfg_t) == 32U, "rs485 config must be 32 bytes");
 _Static_assert(offsetof(rs485_cfg_t, crc) == 6U, "crc follows magic and layout");
+_Static_assert(offsetof(rs485_cfg_t, profile) == 28U, "profile stays in the old reserved slot");
 _Static_assert((RS485_RX_SIZE & RS485_RX_MASK) == 0U, "rx ring is a power of two");
 
 static const uint32_t s_baud_table[RS485_BAUD_COUNT] = {
@@ -153,44 +155,122 @@ static void rs485_cfg_defaults(void)
 }
 
 /*!
-    \brief      把解码器里的零点和校准抄进参数
+    \brief      当前是不是直线位置模式
+    \retval     1 直线，0 角度
+*/
+static uint8_t rs485_is_line(void)
+{
+    return (RS485_TYPE_HALL_POSITION == s_cfg.profile) ? 1U : 0U;
+}
+
+/*!
+    \brief      对外报告的设备类型。旧参数里的 0 仍是角度编码器
+    \retval     RS485_TYPE_HALL_ENCODER 或 RS485_TYPE_HALL_POSITION
+*/
+static uint8_t rs485_device_type(void)
+{
+    if(0U != rs485_is_line()) {
+        return RS485_TYPE_HALL_POSITION;
+    }
+    return RS485_TYPE_HALL_ENCODER;
+}
+
+/*!
+    \brief      把正在使用的零点和校准抄进参数，不动另一种模式的槽位
     \retval     none
 */
 static void rs485_cfg_pull_hall(void)
 {
-    hall_cal_t cal;
     uint32_t i;
 
-    hall_encoder_cal_get(&cal);
-    s_cfg.cal_valid = cal.valid;
-    s_cfg.zero_cdeg = hall_encoder_zero_get();
-    for(i = 0U; i < 3U; i++) {
-        s_cfg.offset[i] = cal.offset[i];
-        s_cfg.gain_q12[i] = cal.gain_q12[i];
+    if(0U != rs485_is_line()) {
+        int16_t baseline[3];
+        uint8_t valid;
+        uint16_t sigma;
+        int16_t zero;
+
+        hall_line_get(baseline, &valid, &sigma, &zero);
+        s_cfg.cal_valid = valid;
+        s_cfg.line_zero_cmm = zero;
+        s_cfg.gain_q12[0] = sigma;
+        for(i = 0U; i < 3U; i++) {
+            s_cfg.offset[i] = baseline[i];
+        }
+        return;
+    }
+
+    {
+        hall_cal_t cal;
+
+        hall_encoder_cal_get(&cal);
+        s_cfg.cal_valid = cal.valid;
+        s_cfg.zero_cdeg = hall_encoder_zero_get();
+        for(i = 0U; i < 3U; i++) {
+            s_cfg.offset[i] = cal.offset[i];
+            s_cfg.gain_q12[i] = cal.gain_q12[i];
+        }
     }
 }
 
 /*!
-    \brief      把参数里的零点和校准装进解码器
+    \brief      把参数装进当前模式。直线模式的宽度放在 gain_q12[0]
     \retval     none
 */
 static void rs485_cfg_push_hall(void)
 {
-    hall_cal_t cal;
     uint32_t i;
 
-    memset(&cal, 0, sizeof(cal));
-    cal.valid = s_cfg.cal_valid;
-    for(i = 0U; i < 3U; i++) {
-        cal.offset[i] = s_cfg.offset[i];
-        cal.gain_q12[i] = s_cfg.gain_q12[i];
-        if(0U == cal.gain_q12[i]) {
-            cal.gain_q12[i] = HALL_CAL_GAIN_ONE;
-            cal.valid = 0U;
-        }
+    if(0U != rs485_is_line()) {
+        hall_line_apply(s_cfg.offset, s_cfg.cal_valid, s_cfg.gain_q12[0], s_cfg.line_zero_cmm);
+        return;
     }
-    hall_encoder_cal_apply(&cal);
-    hall_encoder_zero_set(s_cfg.zero_cdeg);
+
+    {
+        hall_cal_t cal;
+
+        memset(&cal, 0, sizeof(cal));
+        cal.valid = s_cfg.cal_valid;
+        for(i = 0U; i < 3U; i++) {
+            cal.offset[i] = s_cfg.offset[i];
+            cal.gain_q12[i] = s_cfg.gain_q12[i];
+            if(0U == cal.gain_q12[i]) {
+                cal.gain_q12[i] = HALL_CAL_GAIN_ONE;
+                cal.valid = 0U;
+            }
+        }
+        hall_encoder_cal_apply(&cal);
+        hall_encoder_zero_set(s_cfg.zero_cdeg);
+    }
+}
+
+/*!
+    \brief      换成另一种测量，并清掉两边的零点和校准
+    \param[in]  type: RS485_TYPE_HALL_ENCODER 或 RS485_TYPE_HALL_POSITION
+    \retval     none
+*/
+static void rs485_enter_profile(uint8_t type)
+{
+    s_cfg.profile = (RS485_TYPE_HALL_POSITION == type) ? RS485_TYPE_HALL_POSITION : 0U;
+    s_cfg.cal_valid = 0U;
+    s_cfg.zero_cdeg = 0U;
+    s_cfg.line_zero_cmm = 0;
+    s_cfg.offset[0] = 0;
+    s_cfg.offset[1] = 0;
+    s_cfg.offset[2] = 0;
+    hall_encoder_cal_clear();
+    hall_encoder_zero_set(0U);
+    hall_line_cal_clear();
+    hall_line_zero_set(0);
+    if(0U != rs485_is_line()) {
+        s_cfg.gain_q12[0] = HALL_LINE_SIGMA_DEFAULT;
+        s_cfg.gain_q12[1] = 0U;
+        s_cfg.gain_q12[2] = 0U;
+    } else {
+        s_cfg.gain_q12[0] = HALL_CAL_GAIN_ONE;
+        s_cfg.gain_q12[1] = HALL_CAL_GAIN_ONE;
+        s_cfg.gain_q12[2] = HALL_CAL_GAIN_ONE;
+    }
+    rs485_cfg_push_hall();
 }
 
 /*!
@@ -219,6 +299,11 @@ static uint8_t rs485_cfg_sane(const rs485_cfg_t *cfg)
         return 0U;
     }
     if(cfg->zero_cdeg >= 36000U) {
+        return 0U;
+    }
+    if((0U != cfg->profile) &&
+            (RS485_TYPE_HALL_ENCODER != cfg->profile) &&
+            (RS485_TYPE_HALL_POSITION != cfg->profile)) {
         return 0U;
     }
     img = *cfg;
@@ -415,7 +500,7 @@ static void rs485_send_frame(uint8_t dst, uint8_t cmd, uint8_t seq,
     buf[1] = RS485_SOF1;
     buf[2] = dst;
     buf[3] = s_cfg.id;
-    buf[4] = RS485_TYPE_HALL_ENCODER;
+    buf[4] = rs485_device_type();
     buf[5] = cmd;
     buf[6] = seq;
     buf[7] = len;
@@ -441,7 +526,54 @@ static void rs485_pack_sample(uint8_t *p, const hall_sample_t *sample)
     rs485_put_u16(&p[6], sample->raw[0]);
     rs485_put_u16(&p[8], sample->raw[1]);
     rs485_put_u16(&p[10], sample->raw[2]);
-    p[12] = hall_encoder_flags(sample);
+    if(0U != rs485_is_line()) {
+        p[12] = hall_line_flags(sample);
+    } else {
+        p[12] = hall_encoder_flags(sample);
+    }
+}
+
+/*!
+    \brief      读当前模式的一帧采样
+    \param[out] sample: 角度或直线位置
+    \retval     none
+*/
+static void rs485_sense_read(hall_sample_t *sample)
+{
+    if(0U != rs485_is_line()) {
+        hall_line_read(sample);
+    } else {
+        hall_encoder_read(sample);
+    }
+}
+
+/*!
+    \brief      把当前模式的校准填进应答结构
+    直线模式的 gain_q12[0] 是敏感宽度，单位 µm。
+    \param[out] cal: 偏置或基线，以及增益或宽度
+    \retval     none
+*/
+static void rs485_export_cal(hall_cal_t *cal)
+{
+    uint32_t i;
+
+    memset(cal, 0, sizeof(*cal));
+    if(0U != rs485_is_line()) {
+        int16_t baseline[3];
+        uint8_t valid;
+        uint16_t sigma;
+        int16_t zero;
+
+        hall_line_get(baseline, &valid, &sigma, &zero);
+        (void)zero;
+        cal->valid = valid;
+        cal->gain_q12[0] = sigma;
+        for(i = 0U; i < 3U; i++) {
+            cal->offset[i] = baseline[i];
+        }
+        return;
+    }
+    hall_encoder_cal_get(cal);
 }
 
 /*!
@@ -471,7 +603,7 @@ static uint8_t rs485_handle(const uint8_t *frame)
     uint8_t cal_rc;
     uint32_t i;
 
-    if((RS485_TYPE_ANY != type) && (RS485_TYPE_HALL_ENCODER != type)) {
+    if((RS485_TYPE_ANY != type) && (rs485_device_type() != type)) {
         return 0U;
     }
     if((dst != s_cfg.id) && (RS485_ADDR_BCAST != dst)) {
@@ -496,17 +628,22 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        hall_encoder_read(&sample);
-        hall_encoder_cal_get(&cal);
-        pay[1] = RS485_TYPE_HALL_ENCODER;
+        rs485_sense_read(&sample);
+        rs485_export_cal(&cal);
+        pay[1] = rs485_device_type();
         pay[2] = s_cfg.id;
         pay[3] = s_cfg.mode;
         pay[4] = s_cfg.baud_index;
         rs485_put_u16(&pay[5], s_cfg.report_ms);
         rs485_put_u16(&pay[7], RS485_FW_VERSION);
         pay[9] = cal.valid;
-        pay[10] = hall_encoder_flags(&sample);
-        rs485_put_u16(&pay[11], hall_encoder_zero_get());
+        if(0U != rs485_is_line()) {
+            pay[10] = hall_line_flags(&sample);
+            rs485_put_i16(&pay[11], hall_line_zero_get());
+        } else {
+            pay[10] = hall_encoder_flags(&sample);
+            rs485_put_u16(&pay[11], hall_encoder_zero_get());
+        }
         plen = 13U;
         break;
 
@@ -600,6 +737,8 @@ static uint8_t rs485_handle(const uint8_t *frame)
         }
         hall_encoder_cal_clear();
         hall_encoder_zero_set(0U);
+        hall_line_cal_clear();
+        hall_line_zero_set(0);
         rs485_cfg_defaults();
         if(0 != rs485_cfg_save()) {
             s_cfg = old;
@@ -621,7 +760,7 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        hall_encoder_read(&sample);
+        rs485_sense_read(&sample);
         rs485_pack_sample(&pay[1], &sample);
         plen = 14U;
         break;
@@ -629,6 +768,23 @@ static uint8_t rs485_handle(const uint8_t *frame)
     case RS485_CMD_SET_ZERO:
         if((0U != len) && (2U != len)) {
             status = RS485_ERR_LEN;
+            break;
+        }
+        if(0U != rs485_is_line()) {
+            int16_t old_zero = hall_line_zero_get();
+
+            if(2U == len) {
+                hall_line_zero_set((int16_t)rs485_get_u16(in));
+            } else {
+                hall_line_zero_capture();
+            }
+            if(0 != rs485_cfg_save()) {
+                hall_line_zero_set(old_zero);
+                status = RS485_ERR_FLASH;
+                break;
+            }
+            rs485_put_i16(&pay[1], hall_line_zero_get());
+            plen = 3U;
             break;
         }
         zero = hall_encoder_zero_get();
@@ -656,7 +812,11 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        hall_encoder_zero_set(0U);
+        if(0U != rs485_is_line()) {
+            hall_line_zero_set(0);
+        } else {
+            hall_encoder_zero_set(0U);
+        }
         if(0 != rs485_cfg_save()) {
             status = RS485_ERR_FLASH;
             break;
@@ -668,7 +828,11 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        hall_encoder_cal_begin();
+        if(0U != rs485_is_line()) {
+            hall_line_cal_begin();
+        } else {
+            hall_encoder_cal_begin();
+        }
         break;
 
     case RS485_CMD_CAL_END:
@@ -676,7 +840,11 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        cal_rc = hall_encoder_cal_finish();
+        if(0U != rs485_is_line()) {
+            cal_rc = hall_line_cal_finish();
+        } else {
+            cal_rc = hall_encoder_cal_finish();
+        }
         if(HALL_CAL_IDLE == cal_rc) {
             status = RS485_ERR_STATE;
             break;
@@ -689,7 +857,7 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_FLASH;
             break;
         }
-        hall_encoder_cal_get(&cal);
+        rs485_export_cal(&cal);
         for(i = 0U; i < 3U; i++) {
             rs485_put_i16(&pay[1U + (i * 2U)], cal.offset[i]);
             rs485_put_u16(&pay[7U + (i * 2U)], cal.gain_q12[i]);
@@ -702,7 +870,11 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        hall_encoder_cal_clear();
+        if(0U != rs485_is_line()) {
+            hall_line_cal_clear();
+        } else {
+            hall_encoder_cal_clear();
+        }
         if(0 != rs485_cfg_save()) {
             status = RS485_ERR_FLASH;
         }
@@ -713,15 +885,79 @@ static uint8_t rs485_handle(const uint8_t *frame)
             status = RS485_ERR_LEN;
             break;
         }
-        hall_encoder_read(&sample);
-        hall_encoder_cal_get(&cal);
-        pay[1] = hall_encoder_flags(&sample);
+        rs485_sense_read(&sample);
+        rs485_export_cal(&cal);
+        if(0U != rs485_is_line()) {
+            pay[1] = hall_line_flags(&sample);
+        } else {
+            pay[1] = hall_encoder_flags(&sample);
+        }
         for(i = 0U; i < 3U; i++) {
             rs485_put_i16(&pay[2U + (i * 2U)], cal.offset[i]);
             rs485_put_u16(&pay[8U + (i * 2U)], cal.gain_q12[i]);
         }
         plen = 14U;
         break;
+
+    case RS485_CMD_SET_PROFILE: {
+        rs485_cfg_t old;
+
+        if(1U != len) {
+            status = RS485_ERR_LEN;
+            break;
+        }
+        if((RS485_TYPE_HALL_ENCODER != in[0]) && (RS485_TYPE_HALL_POSITION != in[0])) {
+            status = RS485_ERR_PARAM;
+            break;
+        }
+        if(rs485_device_type() == in[0]) {
+            pay[1] = rs485_device_type();
+            plen = 2U;
+            break;
+        }
+        old = s_cfg;
+        rs485_enter_profile(in[0]);
+        if(0 != rs485_cfg_save()) {
+            s_cfg = old;
+            rs485_cfg_push_hall();
+            status = RS485_ERR_FLASH;
+            break;
+        }
+        pay[1] = rs485_device_type();
+        plen = 2U;
+        break;
+    }
+
+    case RS485_CMD_SET_SIGMA: {
+        uint16_t sigma;
+        uint16_t old_sigma;
+
+        if(0U == rs485_is_line()) {
+            status = RS485_ERR_STATE;
+            break;
+        }
+        if(2U != len) {
+            status = RS485_ERR_LEN;
+            break;
+        }
+        sigma = rs485_get_u16(in);
+        if((sigma < HALL_LINE_SIGMA_MIN) || (sigma > HALL_LINE_SIGMA_MAX)) {
+            status = RS485_ERR_PARAM;
+            break;
+        }
+        old_sigma = s_cfg.gain_q12[0];
+        s_cfg.gain_q12[0] = sigma;
+        hall_line_sigma_set(sigma);
+        if(0 != rs485_cfg_save()) {
+            s_cfg.gain_q12[0] = old_sigma;
+            hall_line_sigma_set(old_sigma);
+            status = RS485_ERR_FLASH;
+            break;
+        }
+        rs485_put_u16(&pay[1], s_cfg.gain_q12[0]);
+        plen = 3U;
+        break;
+    }
 
     default:
         status = RS485_ERR_CMD;
@@ -852,7 +1088,7 @@ static void rs485_try_report(uint8_t replied)
         return;
     }
     s_report_ms = now;
-    hall_encoder_read(&sample);
+    rs485_sense_read(&sample);
     rs485_pack_sample(payload, &sample);
     rs485_send_frame(RS485_ADDR_HOST, RS485_CMD_REPORT, s_report_seq, payload, 13U);
     s_report_seq++;
@@ -906,4 +1142,9 @@ uint32_t rs485_proto_baud(void)
 uint8_t rs485_proto_mode(void)
 {
     return s_cfg.mode;
+}
+
+uint8_t rs485_proto_type(void)
+{
+    return rs485_device_type();
 }

@@ -18,6 +18,7 @@ SOF = b"\xA5\x5A"
 HOST = 0x00
 TYPE_ENCODER = 0x01
 TYPE_POSITION = 0x02
+TYPE_ANY = 0xFF
 PAYLOAD_MAX = 32
 
 CMD_GET_INFO = 0x01
@@ -26,6 +27,7 @@ CMD_SET_BAUD = 0x03
 CMD_SET_MODE = 0x04
 CMD_SAVE = 0x05
 CMD_FACTORY = 0x06
+CMD_SET_PROFILE = 0x07
 CMD_GET_DATA = 0x10
 CMD_SET_ZERO = 0x21
 CMD_CLEAR_ZERO = 0x22
@@ -33,6 +35,7 @@ CMD_CAL_BEGIN = 0x23
 CMD_CAL_END = 0x24
 CMD_CAL_CLEAR = 0x25
 CMD_GET_CAL = 0x26
+CMD_SET_SIGMA = 0x27
 CMD_REPORT = 0x30
 CMD_RESPONSE = 0x80
 
@@ -46,7 +49,7 @@ STATUS_TEXT = {
     0x01: "长度不对",
     0x02: "参数超出范围",
     0x03: "当前状态不允许",
-    0x04: "校准数据不够，请继续转动后再结束",
+    0x04: "校准数据不够",
     0x05: "Flash 写入失败",
     0x06: "不认识的命令",
 }
@@ -175,7 +178,10 @@ def parse_info(payload: bytes) -> tuple[str, int | DeviceInfo]:
     if len(payload) < 13:
         return "bad", 0
     report_ms, fw = struct.unpack_from("<HH", payload, 5)
-    zero = struct.unpack_from("<H", payload, 11)[0]
+    if payload[1] == TYPE_POSITION:
+        zero = struct.unpack_from("<h", payload, 11)[0]
+    else:
+        zero = struct.unpack_from("<H", payload, 11)[0]
     info = DeviceInfo(
         dev_type=payload[1],
         dev_id=payload[2],
@@ -214,7 +220,8 @@ class Bus:
         self._parser = Parser()
         self._seq = 0
         self._dev_id = 1
-        self._dev_type = TYPE_ENCODER
+        self._dev_type = TYPE_ANY
+        self._device_kind = TYPE_ENCODER
         self._streaming = False
         self._stream_mode = "poll"
         self._gap_s = 0.01
@@ -320,6 +327,12 @@ class Bus:
         if name == "factory":
             self._factory()
             return
+        if name == "set_profile":
+            self._set_profile(int(cmd[1]))
+            return
+        if name == "set_sigma":
+            self._set_sigma(int(cmd[1]))
+            return
         if name == "set_mode":
             self._apply_mode(int(cmd[1]), int(cmd[2]), quiet=False)
 
@@ -417,7 +430,7 @@ class Bus:
         if kind == "ok" and isinstance(value, Sample):
             self.offer_sample(value)
         elif kind == "err":
-            self._emit("log", f"读角度失败：{status_text(int(value))}")
+            self._emit("log", f"读采样失败：{status_text(int(value))}")
 
     def _read_info(self) -> None:
         frame = self._transact(CMD_GET_INFO, b"", 0.3)
@@ -431,9 +444,17 @@ class Bus:
         self._device_mode = value.mode
         self._report_ms = value.report_ms
         self._dev_id = value.dev_id
+        self._device_kind = value.dev_type
+        if value.dev_type in (TYPE_ENCODER, TYPE_POSITION):
+            self._dev_type = value.dev_type
         self._emit("info", value)
         mode = "主动上报" if value.mode == MODE_REPORT else "主从"
-        self._emit("log", f"设备 {value.dev_id}  固件 {value.fw >> 8}.{value.fw & 0xFF}  {mode}  {value.report_ms} ms")
+        kind_name = "直线位置" if value.dev_type == TYPE_POSITION else "角度编码器"
+        self._emit("log", f"设备 {value.dev_id}  {kind_name}  固件 {value.fw >> 8}.{value.fw & 0xFF}  {mode}  {value.report_ms} ms")
+        if value.dev_type == TYPE_POSITION:
+            cal = self._transact(CMD_GET_CAL, b"", 0.3)
+            if cal is not None and cal.payload and cal.payload[0] == 0:
+                self._after_cal(cal)
 
     def _set_stream(self, mode: str, period_ms: int) -> None:
         if mode == "off":
@@ -498,7 +519,8 @@ class Bus:
 
     def _after_zero(self, frame: Frame) -> None:
         if len(frame.payload) >= 3:
-            zero = struct.unpack_from("<H", frame.payload, 1)[0]
+            fmt = "<h" if self._device_kind == TYPE_POSITION else "<H"
+            zero = struct.unpack_from(fmt, frame.payload, 1)[0]
             self._emit("zero", zero)
 
     def _after_cal(self, frame: Frame) -> None:
@@ -506,7 +528,31 @@ class Bus:
             return
         offsets = struct.unpack_from("<hhh", frame.payload, 1)
         gains = struct.unpack_from("<HHH", frame.payload, 7)
-        self._emit("cal", offsets, gains)
+        self._emit("cal", offsets, gains, frame.payload[1])
+
+    def _set_profile(self, dev_type: int) -> None:
+        if dev_type not in (TYPE_ENCODER, TYPE_POSITION):
+            self._emit("log", "测量模式只能是角度或直线")
+            return
+        frame = self._transact(CMD_SET_PROFILE, bytes((dev_type,)), 0.4)
+        if frame is None or not frame.payload or frame.payload[0] != 0:
+            code = frame.payload[0] if frame and frame.payload else 0
+            self._emit("log", f"切换测量模式失败：{status_text(code) if frame else '超时'}")
+            return
+        self._dev_type = dev_type
+        name = "直线位置" if dev_type == TYPE_POSITION else "角度编码器"
+        self._emit("log", f"已切换为{name}，原来的零点和校准已清除")
+        self._read_info()
+
+    def _set_sigma(self, sigma_um: int) -> None:
+        frame = self._transact(CMD_SET_SIGMA, struct.pack("<H", int(sigma_um) & 0xFFFF), 0.4)
+        if frame is None or not frame.payload or frame.payload[0] != 0:
+            code = frame.payload[0] if frame and frame.payload else 0
+            self._emit("log", f"写敏感宽度失败：{status_text(code) if frame else '超时'}")
+            return
+        got = struct.unpack_from("<H", frame.payload, 1)[0] if len(frame.payload) >= 3 else sigma_um
+        self._emit("sigma", got)
+        self._emit("log", f"敏感宽度已写成 {got / 1000:.1f} mm")
 
     def _set_id(self, new_id: int) -> None:
         if not 1 <= new_id <= 254:
@@ -569,7 +615,8 @@ class Bus:
                 self._emit("connected", False)
                 return
             self._parser.reset()
+        self._dev_type = TYPE_ANY
         self._emit("factory", new_id, baud)
         self._emit("streaming", False)
-        self._emit("log", f"已恢复出厂：设备号 {new_id}，{baud}，主从")
+        self._emit("log", f"已恢复出厂：设备号 {new_id}，{baud}，主从，角度编码器")
         self._read_info()

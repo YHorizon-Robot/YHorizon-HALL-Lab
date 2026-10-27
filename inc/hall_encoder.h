@@ -37,6 +37,7 @@
 #define HALL_FLAG_WEAK              0x01U
 #define HALL_FLAG_CAL_VALID         0x02U
 #define HALL_FLAG_CAL_RUN           0x04U
+#define HALL_FLAG_OUT               0x08U
 
 /*!
     \brief      一次采样结果
@@ -71,6 +72,13 @@ void hall_encoder_init(void);
     \retval     none
 */
 void hall_encoder_read(hall_sample_t *sample);
+
+/*!
+    \brief      复制最近一组三路 ADC 原码，不更新角度校准
+    \param[out] raw: U1、U2、U4，各 12 位
+    \retval     none
+*/
+void hall_encoder_copy_raw(uint16_t raw[3]);
 
 /*!
     \brief      弱磁、校准有效、正在校准
