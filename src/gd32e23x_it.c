@@ -34,6 +34,7 @@ OF SUCH DAMAGE.
 
 #include "gd32e23x_it.h"
 #include "systick.h"
+#include "rs485_proto.h"
 
 #define SRAM_PARITY_CHECK_ERROR_HANDLE(s)    do{}while(1)
 
@@ -103,4 +104,15 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
     delay_decrement();
+}
+
+/*!
+    \brief      USART0 接收中断
+    \param[in]  none
+    \param[out] none
+    \retval     none
+*/
+void USART0_IRQHandler(void)
+{
+    rs485_usart_isr();
 }

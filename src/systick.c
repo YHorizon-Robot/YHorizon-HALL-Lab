@@ -36,6 +36,7 @@ OF SUCH DAMAGE.
 #include "systick.h"
 
 volatile static uint32_t delay;
+static volatile uint32_t s_tick_ms;
 
 /*!
     \brief      configure systick
@@ -77,7 +78,19 @@ void delay_1ms(uint32_t count)
 */
 void delay_decrement(void)
 {
+    s_tick_ms++;
     if(0U != delay) {
         delay--;
     }
+}
+
+/*!
+    \brief      读毫秒计数
+    \param[in]  none
+    \param[out] none
+    \retval     systick_config 之后经过的毫秒
+*/
+uint32_t systick_get_ms(void)
+{
+    return s_tick_ms;
 }

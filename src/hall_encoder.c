@@ -17,6 +17,16 @@
 #define HALL_SQRT3_SHIFT            9
 
 static volatile uint16_t s_adc_dma[HALL_ADC_COUNT];
+static hall_cal_t s_cal = {
+    {0, 0, 0},
+    {HALL_CAL_GAIN_ONE, HALL_CAL_GAIN_ONE, HALL_CAL_GAIN_ONE},
+    0U
+};
+static uint16_t s_zero_cdeg;
+static int32_t s_angle_raw;
+static uint8_t s_cal_run;
+static uint16_t s_cal_min[HALL_ADC_COUNT];
+static uint16_t s_cal_max[HALL_ADC_COUNT];
 
 /*!
     \brief      把未使用的引脚设成模拟输入，降低悬空输入的漏电
@@ -216,11 +226,19 @@ static void hall_solve(const uint16_t raw[3], hall_sample_t *sample)
     uint64_t mag2;
     uint32_t i;
 
-    mean = ((int32_t)raw[0] + (int32_t)raw[1] + (int32_t)raw[2]) / 3;
     for(i = 0U; i < HALL_ADC_COUNT; i++) {
         sample->raw[i] = raw[i];
-        centered[i] = (int32_t)raw[i] - mean;
+        if(0U != s_cal.valid) {
+            centered[i] = (int32_t)raw[i] - (int32_t)s_cal.offset[i];
+            centered[i] = (int32_t)(((int64_t)centered[i] * (int32_t)s_cal.gain_q12[i]) >> 12);
+        } else {
+            centered[i] = (int32_t)raw[i];
+        }
     }
+    mean = (centered[0] + centered[1] + centered[2]) / 3;
+    centered[0] -= mean;
+    centered[1] -= mean;
+    centered[2] -= mean;
 
     s0 = centered[HALL_PHASE_0_DEG];
     s1 = centered[HALL_PHASE_120_DEG];
@@ -235,6 +253,11 @@ static void hall_solve(const uint16_t raw[3], hall_sample_t *sample)
     if(angle < 0) {
         angle += 36000;
     }
+    s_angle_raw = angle;
+    if(angle < (int32_t)s_zero_cdeg) {
+        angle += 36000;
+    }
+    angle -= (int32_t)s_zero_cdeg;
     sample->angle_cdeg = angle;
 
     mag2 = ((int64_t)alpha * alpha) + ((int64_t)beta * beta);
@@ -250,6 +273,29 @@ static void hall_solve(const uint16_t raw[3], hall_sample_t *sample)
     \param[out] sample: 本次结果
     \retval     none
 */
+/*!
+    \brief      校准过程中记下三路原码的最小和最大
+    \param[in]  raw: U1、U2、U4
+    \param[out] none
+    \retval     none
+*/
+static void hall_cal_note(const uint16_t raw[3])
+{
+    uint32_t i;
+
+    if(0U == s_cal_run) {
+        return;
+    }
+    for(i = 0U; i < HALL_ADC_COUNT; i++) {
+        if(raw[i] < s_cal_min[i]) {
+            s_cal_min[i] = raw[i];
+        }
+        if(raw[i] > s_cal_max[i]) {
+            s_cal_max[i] = raw[i];
+        }
+    }
+}
+
 void hall_encoder_read(hall_sample_t *sample)
 {
     uint16_t raw[HALL_ADC_COUNT];
@@ -257,5 +303,126 @@ void hall_encoder_read(hall_sample_t *sample)
     raw[0] = s_adc_dma[0];
     raw[1] = s_adc_dma[1];
     raw[2] = s_adc_dma[2];
+    hall_cal_note(raw);
     hall_solve(raw, sample);
+}
+
+uint8_t hall_encoder_flags(const hall_sample_t *sample)
+{
+    uint8_t flags = 0U;
+
+    if(sample->amplitude < HALL_AMP_WEAK) {
+        flags |= HALL_FLAG_WEAK;
+    }
+    if(0U != s_cal.valid) {
+        flags |= HALL_FLAG_CAL_VALID;
+    }
+    if(0U != s_cal_run) {
+        flags |= HALL_FLAG_CAL_RUN;
+    }
+    return flags;
+}
+
+void hall_encoder_cal_apply(const hall_cal_t *cal)
+{
+    uint32_t i;
+
+    if(0U == cal->valid) {
+        hall_encoder_cal_clear();
+        return;
+    }
+    s_cal.valid = 1U;
+    for(i = 0U; i < HALL_ADC_COUNT; i++) {
+        s_cal.offset[i] = cal->offset[i];
+        if(0U == cal->gain_q12[i]) {
+            s_cal.gain_q12[i] = HALL_CAL_GAIN_ONE;
+        } else {
+            s_cal.gain_q12[i] = cal->gain_q12[i];
+        }
+    }
+}
+
+void hall_encoder_cal_get(hall_cal_t *cal)
+{
+    *cal = s_cal;
+}
+
+void hall_encoder_cal_begin(void)
+{
+    uint32_t i;
+
+    for(i = 0U; i < HALL_ADC_COUNT; i++) {
+        s_cal_min[i] = 4095U;
+        s_cal_max[i] = 0U;
+    }
+    s_cal_run = 1U;
+}
+
+uint8_t hall_encoder_cal_finish(void)
+{
+    uint32_t i;
+    uint16_t span[HALL_ADC_COUNT];
+    int16_t offset[HALL_ADC_COUNT];
+    uint16_t gain_q12[HALL_ADC_COUNT];
+    uint32_t gain;
+
+    if(0U == s_cal_run) {
+        return HALL_CAL_IDLE;
+    }
+    for(i = 0U; i < HALL_ADC_COUNT; i++) {
+        if(s_cal_max[i] <= s_cal_min[i]) {
+            return HALL_CAL_WEAK;
+        }
+        span[i] = (uint16_t)(s_cal_max[i] - s_cal_min[i]);
+        if(span[i] < HALL_CAL_SPAN_MIN) {
+            return HALL_CAL_WEAK;
+        }
+        offset[i] = (int16_t)(((uint32_t)s_cal_min[i] + (uint32_t)s_cal_max[i]) / 2U);
+        gain = ((uint32_t)span[0] << 12) / (uint32_t)span[i];
+        if((0U == gain) || (gain > 65535U)) {
+            return HALL_CAL_WEAK;
+        }
+        gain_q12[i] = (uint16_t)gain;
+    }
+    for(i = 0U; i < HALL_ADC_COUNT; i++) {
+        s_cal.offset[i] = offset[i];
+        s_cal.gain_q12[i] = gain_q12[i];
+    }
+    s_cal.valid = 1U;
+    s_cal_run = 0U;
+    return HALL_CAL_OK;
+}
+
+void hall_encoder_cal_clear(void)
+{
+    uint32_t i;
+
+    s_cal_run = 0U;
+    s_cal.valid = 0U;
+    for(i = 0U; i < HALL_ADC_COUNT; i++) {
+        s_cal.offset[i] = 0;
+        s_cal.gain_q12[i] = HALL_CAL_GAIN_ONE;
+        s_cal_min[i] = 4095U;
+        s_cal_max[i] = 0U;
+    }
+}
+
+void hall_encoder_zero_set(uint16_t zero_cdeg)
+{
+    if(zero_cdeg < 36000U) {
+        s_zero_cdeg = zero_cdeg;
+    }
+}
+
+uint16_t hall_encoder_zero_get(void)
+{
+    return s_zero_cdeg;
+}
+
+void hall_encoder_zero_capture(void)
+{
+    hall_sample_t sample;
+
+    hall_encoder_read(&sample);
+    s_zero_cdeg = (uint16_t)s_angle_raw;
 }

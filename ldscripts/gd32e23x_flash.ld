@@ -28,7 +28,8 @@
 /* memory map */
 MEMORY
 {
-  FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 32K
+  /* Last 1 KB page (0x08007C00) stores RS485 id, baud, zero and calibration. */
+  FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 31K
   RAM (xrw)       : ORIGIN = 0x20000000, LENGTH = 6K
 }
 

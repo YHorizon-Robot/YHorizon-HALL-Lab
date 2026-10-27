@@ -1,17 +1,18 @@
 /*!
     \file    main.c
-    \brief   三路霍尔角度通过 RTT 输出
+    \brief   三路霍尔角度，RTT 调试，RS485 对外通信
 
     每 50 ms 打一行：
       adc <U1> <U2> <U4> ang <度.百分度> amp <峰值>
     amp 太小会额外带 weak，表示磁铁不在有效范围内，角度会乱跳。
     PB4 驱动状态灯，低电平点亮，约 500 ms 翻转一次。
-    PB5 是 RS485 方向，保持低电平，收发器停在接收。
+    PB5 是 RS485 方向，上电先拉低，随后由协议模块控制。
 */
 
 #include "gd32e23x.h"
 #include "systick.h"
 #include "hall_encoder.h"
+#include "rs485_proto.h"
 #include "SEGGER_RTT.h"
 
 /*!
@@ -27,6 +28,7 @@ static void board_gpio_init(void)
     gpio_mode_set(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_4 | GPIO_PIN_5);
     gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_4 | GPIO_PIN_5);
     gpio_bit_set(GPIOB, GPIO_PIN_4);
+    /*! 收发器默认接收。rs485_proto_init 会再次配置这只脚。 */
     gpio_bit_reset(GPIOB, GPIO_PIN_5);
 }
 
@@ -61,22 +63,34 @@ static void hall_rtt_print(const hall_sample_t *sample)
 int main(void)
 {
     hall_sample_t sample;
-    uint32_t beat = 0U;
+    uint32_t rtt_ms = 0U;
+    uint32_t led_ms = 0U;
 
     systick_config();
     SEGGER_RTT_Init();
     SEGGER_RTT_printf(0, "hall encoder U1 U2 U4\r\n");
     board_gpio_init();
     hall_encoder_init();
+    rs485_proto_init();
+    SEGGER_RTT_printf(0, "rs485 id %u baud %u mode %u\r\n",
+                      (unsigned)rs485_proto_id(),
+                      (unsigned)rs485_proto_baud(),
+                      (unsigned)rs485_proto_mode());
 
     while(1) {
-        hall_encoder_read(&sample);
-        hall_rtt_print(&sample);
+        uint32_t now = systick_get_ms();
 
-        beat++;
-        if(0U == (beat % 10U)) {
+        /*! 主循环持续采样，校准过程才能记下一整圈的峰峰值。 */
+        hall_encoder_read(&sample);
+        rs485_proto_poll();
+
+        if((now - rtt_ms) >= 50U) {
+            rtt_ms = now;
+            hall_rtt_print(&sample);
+        }
+        if((now - led_ms) >= 500U) {
+            led_ms = now;
             gpio_bit_toggle(GPIOB, GPIO_PIN_4);
         }
-        delay_1ms(50U);
     }
 }
