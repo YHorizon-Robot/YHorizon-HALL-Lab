@@ -2,11 +2,15 @@
     \file    hall_line.h
     \brief   三颗等间距霍尔组成的直线位置
 
-    物理顺序沿直线为 U1、U2、U4，间距 10 mm。U2 是 0，正方向指向 U4，
-    所以 U1 在 -10 mm，U4 在 +10 mm。顺序和板子不一致时，只改下面三个下标。
+    从下到上是 ADC1、ADC2、ADC3（原理图 U1、U2、U4）。相邻两颗相距 10 mm，
+    ADC1 与 ADC3 相距 20 mm。ADC2 是 0，正方向朝上指向 ADC3，
+    所以 ADC1 在 -10 mm，ADC3 在 +10 mm。顺序和板子不一致时，只改下面三个下标。
 
-    先减掉零磁场基线，再把绝对值最大的那一路翻成正峰。位置用峰和
-    更强的相邻一路做对数高斯比值，敏感宽度要和磁铁高度一起调。
+    每路减自己的空载。某一路霍尔天生偏低时，基线会在磁铁离开它之后
+    收到这一路自己的数值，不再跟另外两路共用 2048。
+    主峰取被压低的那一路，旁边被抬高的回流不参与定位。位置是三路
+    下拉量的重心。只有 ±3 mm 这一段把过渡稍微拉开，其余行程保持线性重心。
+    磁铁在 ADC1 上是 -10 mm，在 ADC3 上是 +10 mm，两端相距 20 mm。
     结果写进 hall_sample_t.angle_cdeg，单位是 0.01 mm，不是角度。
 */
 
@@ -21,10 +25,10 @@
 #define HALL_LINE_SIGMA_MIN         2000U
 #define HALL_LINE_SIGMA_MAX         30000U
 
-/*! 原码下标：左、中、右。默认就是 U1、U2、U4 */
-#define HALL_LINE_LEFT              0
+/*! 原码下标：下、中、上。默认就是 ADC1、ADC2、ADC3 */
+#define HALL_LINE_BOTTOM            0
 #define HALL_LINE_MID               1
-#define HALL_LINE_RIGHT             2
+#define HALL_LINE_TOP               2
 
 /*!
     \brief      装入基线、敏感宽度和机械零点
@@ -58,13 +62,15 @@ void hall_line_get(int16_t baseline[3], uint8_t *valid,
 void hall_line_sigma_set(uint16_t sigma_um);
 
 /*!
-    \brief      开始对零磁场取平均。磁铁要先拿开
+    \brief      开始记录每路自己的空载
+    磁铁拿开后停留，或在阵列上扫过都可以。出现最多的电平会当成这一路的基线。
     \retval     none
 */
 void hall_line_cal_begin(void);
 
 /*!
-    \brief      用已经采到的平均值作为基线
+    \brief      用每路出现最多的那一团作为基线
+    磁铁扫过的坑不参与。有一路全程被压着时不写入，校准继续留着。
     \retval     HALL_CAL_OK、HALL_CAL_IDLE 或 HALL_CAL_WEAK
 */
 uint8_t hall_line_cal_finish(void);

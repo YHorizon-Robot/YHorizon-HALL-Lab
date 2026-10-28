@@ -456,7 +456,7 @@ class MainWindow(QMainWindow):
         self.btn_cal_end.clicked.connect(lambda: self.bus.submit("cal_end"))
         self.btn_cal_clear = QPushButton("清除校准")
         self.btn_cal_clear.clicked.connect(lambda: self.bus.submit("cal_clear"))
-        self.cal_label = QLabel("角度模式先转满一圈。直线模式先把磁铁拿开，再采基线。")
+        self.cal_label = QLabel("角度模式先转满一圈。直线模式把磁铁拿开再结束，扫过阵列也不会把坑写进基线。")
         self.cal_label.setWordWrap(True)
         self.cal_label.setObjectName("muted")
         cal_layout.addWidget(self.btn_profile, 0, 0, 1, 2)
@@ -601,7 +601,7 @@ class MainWindow(QMainWindow):
     def _toggle_profile(self) -> None:
         target = busmod.TYPE_ENCODER if self.kind == busmod.TYPE_POSITION else busmod.TYPE_POSITION
         if target == busmod.TYPE_POSITION:
-            self._log("切换后把磁铁拿开，点开始校准再结束，采集零磁场基线。")
+            self._log("切换后点开始校准，磁铁拿开停一会再结束。某一路偏低会按它自己的空载保存。")
         self.bus.submit("set_profile", target)
 
     def _write_sigma(self) -> None:
@@ -609,7 +609,7 @@ class MainWindow(QMainWindow):
 
     def _cal_begin(self) -> None:
         if self.kind == busmod.TYPE_POSITION:
-            self.cal_label.setText("正在采集零磁场基线。确认磁铁已经拿开，再点结束校准。")
+            self.cal_label.setText("正在记每路空载。磁铁拿开停一秒再结束；中途扫过没关系。若提示数据不够，拿开后再点一次结束。")
         else:
             self.cal_label.setText("正在记录。请把磁铁匀速转满至少一圈，再点结束校准。")
         self.bus.submit("cal_begin")
@@ -715,9 +715,9 @@ class MainWindow(QMainWindow):
                     self.sigma.setValue(gains[0] / 1000.0)
                     if flags & 2:
                         off_text = " / ".join(str(v) for v in offsets)
-                        self.cal_label.setText(f"基线 {off_text}\n敏感宽度 {gains[0] / 1000:.1f} mm")
+                        self.cal_label.setText(f"基线 {off_text}")
                     else:
-                        self.cal_label.setText(f"尚未采集基线，当前按 2048 估算\n敏感宽度 {gains[0] / 1000:.1f} mm")
+                        self.cal_label.setText("尚未采集基线，当前按 2048 估算")
                 else:
                     gain_text = " / ".join(f"{g / 4096:.3f}" for g in gains)
                     off_text = " / ".join(str(v) for v in offsets)
