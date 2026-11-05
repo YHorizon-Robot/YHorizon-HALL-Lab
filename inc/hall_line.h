@@ -6,10 +6,12 @@
     ADC1 与 ADC3 相距 20 mm。ADC2 是 0，正方向朝上指向 ADC3，
     所以 ADC1 在 -10 mm，ADC3 在 +10 mm。顺序和板子不一致时，只改下面三个下标。
 
-    每路减自己的空载。某一路霍尔天生偏低时，基线会在磁铁离开它之后
-    收到这一路自己的数值，不再跟另外两路共用 2048。
-    主峰取被压低的那一路，旁边被抬高的回流不参与定位。位置是三路
-    下拉量的重心。只有 ±3 mm 这一段把过渡稍微拉开，其余行程保持线性重心。
+    每路减自己校准得到的空载。磁铁不在阵列上时基线才慢慢跟温漂，
+    磁铁停在任何位置时基线不动，读数不会漂。
+    主峰取被压低的那一路，旁边被抬高的回流不参与定位。行程拆成两段：
+    ADC1 与 ADC2 算出 -10 mm 到 0，ADC2 与 ADC3 算出 0 到 +10 mm。
+    每段用两路下拉量的对数比值，斜率由敏感宽度 sigma 决定；
+    8 mm 磁铁离霍尔约 4 mm 时 sigma 约 3.4 mm。再按 ADC1、ADC3 的下拉量拼接。
     磁铁在 ADC1 上是 -10 mm，在 ADC3 上是 +10 mm，两端相距 20 mm。
     结果写进 hall_sample_t.angle_cdeg，单位是 0.01 mm，不是角度。
 */
@@ -21,7 +23,7 @@
 
 #define HALL_LINE_PITCH_UM          10000
 #define HALL_LINE_SPAN_UM           15000
-#define HALL_LINE_SIGMA_DEFAULT     8000U
+#define HALL_LINE_SIGMA_DEFAULT     3400U
 #define HALL_LINE_SIGMA_MIN         2000U
 #define HALL_LINE_SIGMA_MAX         30000U
 
@@ -31,11 +33,22 @@
 #define HALL_LINE_TOP               2
 
 /*!
+    直线模式判断有磁铁，除了 hall_encoder.h 里的饱和和去抖，还要：
+      - 已经校准过基线，否则 2048 和真实空载之差会被当成磁场；
+      - 最深一路的下拉量过门限。8 mm 磁铁离霍尔 4 mm 时，
+        正对一颗约 1200–1430，两颗中间约 375；
+      - 最浅一路不超过最深一路的一半。均匀外磁场让三路一起变，会被这一条挡掉。
+    磁铁抬高后中点幅度会变小，那时可以把门限往下调，但不要低于 80。
+*/
+#define HALL_LINE_MAG_ON            200
+#define HALL_LINE_MAG_OFF           120
+
+/*!
     \brief      装入基线、敏感宽度和机械零点
     valid 为 0 时基线用 2048，并清掉“已校准”标志。
     \param[in]  baseline: 三路零磁场原码
     \param[in]  valid: 非 0 表示基线可用
-    \param[in]  sigma_um: 高斯宽度，单位 µm，超出范围时用默认 8 mm
+    \param[in]  sigma_um: 高斯宽度，单位 µm，超出范围时用默认 3.4 mm
     \param[in]  zero_cmm: 要从位置里减掉的零点，单位 0.01 mm
     \retval     none
 */
@@ -96,20 +109,21 @@ int16_t hall_line_zero_get(void);
 
 /*!
     \brief      把此刻的位置记成 0
-    \retval     none
+    \retval     1 成功，0 没有确认磁铁，零点不变
 */
-void hall_line_zero_capture(void);
+uint8_t hall_line_zero_capture(void);
 
 /*!
     \brief      读原码并解算位置
-    angle_cdeg 在这里是有符号的 0.01 mm，amplitude 是正峰的 ADC 计数。
+    angle_cdeg 在这里是有符号的 0.01 mm，没有确认磁铁时是 HALL_NO_MAGNET。
+    amplitude 是正峰的 ADC 计数，任何时候都如实给出，方便看门限。
     \param[out] sample: 原码、位置和峰值
     \retval     none
 */
 void hall_line_read(hall_sample_t *sample);
 
 /*!
-    \brief      弱磁、基线有效、正在采基线、超出阵列
+    \brief      弱磁、基线有效、正在采基线、超出阵列、有磁铁、饱和
     \param[in]  sample: 最近一次解算
     \retval     HALL_FLAG_* 的组合
 */

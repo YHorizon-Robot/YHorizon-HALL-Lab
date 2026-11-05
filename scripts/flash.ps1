@@ -1,15 +1,18 @@
-# Flash Hall_Senser onto GD32E230G6 with OpenOCD (CMSIS-DAP / SWD).
+﻿# Flash Hall_Senser onto GD32E230G6 with OpenOCD (CMSIS-DAP / SWD).
 # Prefer GigaDevice OpenOCD (`gd32e23x`). xPack/stock OpenOCD uses
 # scripts/openocd-gd32e230-stm32f1x.cfg (32 KB, no mass_erase).
 # Usage:
 #   .\scripts\flash.ps1
 #   .\scripts\flash.ps1 -BuildBeforeFlash
-#   .\scripts\flash.ps1 -Preset release
+#   .\scripts\flash.ps1 -Preset debug
 #   .\scripts\flash.ps1 -ElfFile 'D:\path\Hall_Senser.elf'
+#   .\scripts\flash.ps1 -EraseConfig
+# -EraseConfig 只擦最后 1 KB（0x08007C00）里的设备号、模式、基线和宽度，
+# 程序本身照常烧录。擦完上电回到角度编码器、设备号 1、115200。
 
 param(
     [ValidateSet('debug', 'release')]
-    [string]$Preset = 'debug',
+    [string]$Preset = 'release',
 
     [string]$ElfFile = '',
     [string]$OpenOcdExe = '',
@@ -18,7 +21,8 @@ param(
 
     [Alias('Build')]
     [switch]$BuildBeforeFlash,
-    [switch]$NoResetRun
+    [switch]$NoResetRun,
+    [switch]$EraseConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -169,14 +173,20 @@ $resolvedElf = (Resolve-Path -LiteralPath $ElfFile).Path
 $elfForOpenOcd = $resolvedElf.Replace('\', '/')
 
 # Page-erase used pages, then verify. Do not stm32f1x mass_erase.
+# -EraseConfig also wipes the last 1 KB parameter page, which program never touches.
 $commands = @(
     'tcl port disabled',
     'gdb port disabled'
 )
-if ($NoResetRun) {
-    $commands += "program `"$elfForOpenOcd`" verify exit"
+$program = "program `"$elfForOpenOcd`" verify"
+if (-not $NoResetRun) {
+    $program += ' reset'
+}
+$program += ' exit'
+if ($EraseConfig) {
+    $commands += "init; reset halt; flash erase_address 0x08007C00 0x400; $program"
 } else {
-    $commands += "program `"$elfForOpenOcd`" verify reset exit"
+    $commands += $program
 }
 
 $ocdArgs = @(
@@ -195,6 +205,9 @@ if ($hasGd32) {
     Write-Host "Flash: gd32e23x program+verify (no mass_erase)"
 } else {
     Write-Host "Flash: stm32f1x fallback 32 KB program+verify (no mass_erase)"
+}
+if ($EraseConfig) {
+    Write-Host "Config: erase 0x08007C00 (1 KB). Next boot is encoder, id 1, 115200."
 }
 
 Invoke-Native -Exe $OpenOcdExe -Arguments $ocdArgs

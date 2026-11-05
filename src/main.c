@@ -7,6 +7,7 @@
     直线模式打：
       adc <U1> <U2> <U4> pos <毫米.百分毫米> mm amp <峰值>
     amp 太小会额外带 weak。直线位置超出阵列两端时带 out。
+    没有确认磁铁时不打角度或位置，改成 nomag，饱和再带 sat。
     PB4 驱动状态灯，低电平点亮，约 500 ms 翻转一次。
     PB5 是 RS485 方向，上电先拉低，随后由协议模块控制。
 */
@@ -36,6 +37,20 @@ static void board_gpio_init(void)
 }
 
 /*!
+    \brief      没有确认磁铁时只打原码和幅度
+    \param[in]  sample: 原码和幅度
+    \param[in]  flags: HALL_FLAG_*
+    \retval     none
+*/
+static void hall_rtt_print_nomag(const hall_sample_t *sample, uint8_t flags)
+{
+    SEGGER_RTT_printf(0, "adc %u %u %u nomag amp %d%s\r\n",
+                      (unsigned)sample->raw[0], (unsigned)sample->raw[1], (unsigned)sample->raw[2],
+                      (int)sample->amplitude,
+                      (0U != (flags & HALL_FLAG_SAT)) ? " sat" : "");
+}
+
+/*!
     \brief      把一帧霍尔结果打到 RTT
     \param[in]  sample: 原码和角度
     \param[out] none
@@ -45,7 +60,12 @@ static void hall_rtt_print(const hall_sample_t *sample)
 {
     int32_t whole = sample->angle_cdeg / 100;
     int32_t frac = sample->angle_cdeg % 100;
+    uint8_t flags = hall_encoder_flags(sample);
 
+    if(0U == (flags & HALL_FLAG_MAGNET)) {
+        hall_rtt_print_nomag(sample, flags);
+        return;
+    }
     if(sample->amplitude < HALL_AMP_WEAK) {
         SEGGER_RTT_printf(0, "adc %u %u %u ang %d.%02d amp %d weak\r\n",
                           (unsigned)sample->raw[0], (unsigned)sample->raw[1], (unsigned)sample->raw[2],
@@ -71,6 +91,10 @@ static void hall_rtt_print_pos(const hall_sample_t *sample)
     const char *sign = "";
     const char *note = "";
 
+    if(0U == (flags & HALL_FLAG_MAGNET)) {
+        hall_rtt_print_nomag(sample, flags);
+        return;
+    }
     if(value < 0) {
         sign = "-";
         value = -value;

@@ -69,6 +69,7 @@ QLabel { background: transparent; color: #e6e8eb; }
 QLabel#muted { color: #8b93a1; }
 QLabel#angle { font-size: 34px; font-weight: 650; color: #f4f7fb; }
 QLabel#rpm { font-size: 16px; color: #b6f25c; }
+QLabel#magnet { font-size: 15px; font-weight: 650; padding: 4px; border-radius: 6px; }
 QPushButton {
     background: #2c313b;
     border: 1px solid #434b5a;
@@ -191,7 +192,13 @@ class TraceStore:
         self.rate_times.clear()
 
     def add(self, sample: busmod.Sample) -> None:
-        if self.linear:
+        if not sample.has_magnet:
+            # 没有磁铁的这一段曲线断开，速度清零，回来后重新起算
+            self.primed = False
+            self.rpm = 0.0
+            deg = math.nan
+            self.unwrap = math.nan
+        elif self.linear:
             deg = sample.angle_cdeg / 100.0
             if self.primed:
                 dt = sample.t - self.last_t
@@ -382,6 +389,10 @@ class MainWindow(QMainWindow):
         self.detail.setObjectName("muted")
         self.flags = QLabel("未连接")
         self.flags.setObjectName("muted")
+        self.magnet_label = QLabel("磁铁 —")
+        self.magnet_label.setObjectName("magnet")
+        self.magnet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        live_layout.addWidget(self.magnet_label)
         live_layout.addWidget(self.dial)
         live_layout.addWidget(self.angle_label)
         live_layout.addWidget(self.rpm_label)
@@ -442,7 +453,7 @@ class MainWindow(QMainWindow):
         self.sigma.setRange(2.0, 30.0)
         self.sigma.setSingleStep(0.5)
         self.sigma.setDecimals(1)
-        self.sigma.setValue(8.0)
+        self.sigma.setValue(3.4)
         self.sigma.setSuffix(" mm")
         self.btn_sigma = QPushButton("写宽度")
         self.btn_sigma.clicked.connect(self._write_sigma)
@@ -785,13 +796,15 @@ class MainWindow(QMainWindow):
     def _take_sample(self, sample: busmod.Sample) -> None:
         self.store.add(sample)
         if self.csv_writer is not None:
-            if self.store.linear:
-                reading = sample.angle_cdeg / 100.0
+            if not sample.has_magnet:
+                reading = ""
+            elif self.store.linear:
+                reading = f"{sample.angle_cdeg / 100.0:.2f}"
             else:
-                reading = (sample.angle_cdeg % 36000) / 100.0
+                reading = f"{(sample.angle_cdeg % 36000) / 100.0:.2f}"
             self.csv_writer.writerow([
                 f"{sample.t:.6f}",
-                f"{reading:.2f}",
+                reading,
                 sample.amplitude,
                 sample.raw[0],
                 sample.raw[1],
@@ -817,7 +830,9 @@ class MainWindow(QMainWindow):
                 noise = 1.5 * math.sin(theta * 17 + index)
                 raw.append(int(2048 + amp * math.cos(theta + shift) + noise))
             deg = math.degrees(theta) % 360.0
-            sample = busmod.Sample(self.demo_next, int(round(deg * 100)), int(amp), (raw[0], raw[1], raw[2]), 0)
+            sample = busmod.Sample(
+                self.demo_next, int(round(deg * 100)) % 36000, int(amp), (raw[0], raw[1], raw[2]), busmod.FLAG_MAGNET
+            )
             self._take_sample(sample)
             self.demo_theta += omega * step
             self.demo_next += step
@@ -831,7 +846,12 @@ class MainWindow(QMainWindow):
         latest = self.store.latest
         linear = self.store.linear and not self.demo_on
         if latest is not None:
-            if linear:
+            present = latest.has_magnet
+            self._show_magnet(latest, linear)
+            if not present:
+                self.angle_label.setText("无磁铁")
+                self.rpm_label.setText("—")
+            elif linear:
                 mm = latest.angle_cdeg / 100.0
                 clamped = max(-20.0, min(20.0, mm))
                 self.dial.set_angle(90.0 - clamped / 20.0 * 90.0)
@@ -842,8 +862,8 @@ class MainWindow(QMainWindow):
                 self.dial.set_angle(deg)
                 self.angle_label.setText(f"{deg:.2f}°")
                 self.rpm_label.setText(f"{self.store.rpm:+.1f} RPM")
-            weak = bool(latest.flags & 1)
-            self.angle_label.setStyleSheet("color: #ff6b6b;" if weak else "color: #f4f7fb;")
+            dim = (not present) or bool(latest.flags & busmod.FLAG_WEAK)
+            self.angle_label.setStyleSheet("color: #ff6b6b;" if dim else "color: #f4f7fb;")
             self.detail.setText(
                 f"幅度 {latest.amplitude}    U1 {latest.raw[0]}    U2 {latest.raw[1]}    U4 {latest.raw[2]}"
             )
@@ -856,6 +876,8 @@ class MainWindow(QMainWindow):
                 parts.append("校准中")
             if latest.flags & 8:
                 parts.append("超出阵列")
+            if latest.flags & busmod.FLAG_SAT:
+                parts.append("ADC 饱和")
             if parts:
                 self.flags.setText("  ".join(parts))
         view = self.store.visible(float(self.span.currentData()), self.wrap.isChecked() and not linear)
@@ -875,8 +897,7 @@ class MainWindow(QMainWindow):
                 self.plot_angle.setYRange(-10, 370, padding=0)
             else:
                 self.plot_angle.getViewBox().enableAutoRange(y=True)
-        connect = "finite" if wrap else "all"
-        self.angle_curve.setData(t, angle, connect=connect, skipFiniteCheck=not wrap)
+        self.angle_curve.setData(t, angle, connect="finite", skipFiniteCheck=False)
         if self.follow.isChecked() and t.size:
             self._programmatic_range = True
             end = float(t[-1])
@@ -884,6 +905,19 @@ class MainWindow(QMainWindow):
             self.plot_adc.setXRange(end - span, end + span * 0.02, padding=0)
             self._programmatic_range = False
         self._update_status()
+
+    def _show_magnet(self, sample: busmod.Sample, linear: bool) -> None:
+        if sample.has_magnet:
+            text, fg, bg = "有磁铁", "#0f1a0a", "#b6f25c"
+        elif sample.flags & busmod.FLAG_SAT:
+            text, fg, bg = "磁铁太近，ADC 饱和", "#1a0f0a", "#ffb020"
+        elif linear and not (sample.flags & busmod.FLAG_CAL_VALID):
+            text, fg, bg = "未校准，不判断磁铁", "#1a0f0a", "#ffb020"
+        else:
+            text, fg, bg = "无磁铁", "#ffffff", "#c0392b"
+        if self.magnet_label.text() != text:
+            self.magnet_label.setText(text)
+            self.magnet_label.setStyleSheet(f"color: {fg}; background: {bg};")
 
     def _update_status(self) -> None:
         link = "已连接" if self.connected else "未连接"

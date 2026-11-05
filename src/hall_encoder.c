@@ -27,6 +27,56 @@ static int32_t s_angle_raw;
 static uint8_t s_cal_run;
 static uint16_t s_cal_min[HALL_ADC_COUNT];
 static uint16_t s_cal_max[HALL_ADC_COUNT];
+static hall_presence_t s_presence;
+static uint8_t s_sat;
+
+uint8_t hall_presence_update(hall_presence_t *p, uint8_t enter, uint8_t keep)
+{
+    uint32_t now = systick_get_ms();
+    uint8_t want_change;
+    uint32_t hold;
+
+    if(0U != p->present) {
+        want_change = (0U == keep) ? 1U : 0U;
+        hold = HALL_MAG_OFF_MS;
+    } else {
+        want_change = (0U != enter) ? 1U : 0U;
+        hold = HALL_MAG_ON_MS;
+    }
+    if(0U == want_change) {
+        p->timing = 0U;
+        return p->present;
+    }
+    if(0U == p->timing) {
+        p->timing = 1U;
+        p->since_ms = now;
+        return p->present;
+    }
+    if((now - p->since_ms) >= hold) {
+        p->present = (0U != p->present) ? 0U : 1U;
+        p->timing = 0U;
+    }
+    return p->present;
+}
+
+void hall_presence_reset(hall_presence_t *p)
+{
+    p->present = 0U;
+    p->timing = 0U;
+    p->since_ms = 0U;
+}
+
+uint8_t hall_raw_saturated(const uint16_t raw[3])
+{
+    uint32_t i;
+
+    for(i = 0U; i < 3U; i++) {
+        if((raw[i] <= HALL_RAW_SAT_LO) || (raw[i] >= HALL_RAW_SAT_HI)) {
+            return 1U;
+        }
+    }
+    return 0U;
+}
 
 /*!
     \brief      把未使用的引脚设成模拟输入，降低悬空输入的漏电
@@ -306,10 +356,22 @@ void hall_encoder_copy_raw(uint16_t raw[3])
 void hall_encoder_read(hall_sample_t *sample)
 {
     uint16_t raw[HALL_ADC_COUNT];
+    uint8_t enter;
+    uint8_t keep;
 
     hall_encoder_copy_raw(raw);
     hall_cal_note(raw);
     hall_solve(raw, sample);
+    /*!
+        三路共模已经减掉，外界均匀磁场不会产生幅度。幅度只来自转动磁铁
+        的三相分量，或者未校准时三路偏置之差，后者远低于进入门限。
+    */
+    s_sat = hall_raw_saturated(raw);
+    enter = ((0U == s_sat) && (sample->amplitude >= HALL_ENC_MAG_ON)) ? 1U : 0U;
+    keep = ((0U == s_sat) && (sample->amplitude >= HALL_ENC_MAG_OFF)) ? 1U : 0U;
+    if(0U == hall_presence_update(&s_presence, enter, keep)) {
+        sample->angle_cdeg = HALL_NO_MAGNET;
+    }
 }
 
 uint8_t hall_encoder_flags(const hall_sample_t *sample)
@@ -324,6 +386,12 @@ uint8_t hall_encoder_flags(const hall_sample_t *sample)
     }
     if(0U != s_cal_run) {
         flags |= HALL_FLAG_CAL_RUN;
+    }
+    if(0U != s_presence.present) {
+        flags |= HALL_FLAG_MAGNET;
+    }
+    if(0U != s_sat) {
+        flags |= HALL_FLAG_SAT;
     }
     return flags;
 }
@@ -424,10 +492,14 @@ uint16_t hall_encoder_zero_get(void)
     return s_zero_cdeg;
 }
 
-void hall_encoder_zero_capture(void)
+uint8_t hall_encoder_zero_capture(void)
 {
     hall_sample_t sample;
 
     hall_encoder_read(&sample);
+    if(0U == s_presence.present) {
+        return 0U;
+    }
     s_zero_cdeg = (uint16_t)s_angle_raw;
+    return 1U;
 }

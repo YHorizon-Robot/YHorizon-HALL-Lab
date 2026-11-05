@@ -42,13 +42,22 @@ CMD_RESPONSE = 0x80
 MODE_POLL = 0
 MODE_REPORT = 1
 
+FLAG_WEAK = 0x01
+FLAG_CAL_VALID = 0x02
+FLAG_CAL_RUN = 0x04
+FLAG_OUT = 0x08
+FLAG_MAGNET = 0x10
+FLAG_SAT = 0x20
+# 固件在没有确认磁铁时把 int32 固定成这个值
+NO_MAGNET = -0x80000000
+
 BAUD_TABLE = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 
 STATUS_TEXT = {
     0x00: "成功",
     0x01: "长度不对",
     0x02: "参数超出范围",
-    0x03: "当前状态不允许",
+    0x03: "当前状态不允许（设零点需要先确认有磁铁）",
     0x04: "校准数据不够。直线模式请把磁铁拿开后再结束",
     0x05: "Flash 写入失败",
     0x06: "不认识的命令",
@@ -93,6 +102,11 @@ class Sample:
     amplitude: int
     raw: tuple[int, int, int]
     flags: int
+
+    @property
+    def has_magnet(self) -> bool:
+        """只有固件确认有磁铁，angle_cdeg 才是真实读数。"""
+        return self.angle_cdeg != NO_MAGNET and bool(self.flags & FLAG_MAGNET)
 
 
 @dataclass
@@ -524,11 +538,22 @@ class Bus:
             self._emit("zero", zero)
 
     def _after_cal(self, frame: Frame) -> None:
-        if len(frame.payload) < 13:
+        payload = frame.payload
+        # 结束校准是 13 字节：状态 + 3 个 int16 + 3 个 uint16，成功时没有标志字节。
+        # 读取校准是 14 字节：状态、标志，然后才是偏置和增益。
+        if len(payload) >= 14:
+            flags = payload[1]
+            offset_at = 2
+            gain_at = 8
+        elif len(payload) >= 13:
+            flags = 0x02
+            offset_at = 1
+            gain_at = 7
+        else:
             return
-        offsets = struct.unpack_from("<hhh", frame.payload, 1)
-        gains = struct.unpack_from("<HHH", frame.payload, 7)
-        self._emit("cal", offsets, gains, frame.payload[1])
+        offsets = struct.unpack_from("<hhh", payload, offset_at)
+        gains = struct.unpack_from("<HHH", payload, gain_at)
+        self._emit("cal", offsets, gains, flags)
 
     def _set_profile(self, dev_type: int) -> None:
         if dev_type not in (TYPE_ENCODER, TYPE_POSITION):

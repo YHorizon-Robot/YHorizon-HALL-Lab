@@ -775,8 +775,9 @@ static uint8_t rs485_handle(const uint8_t *frame)
 
             if(2U == len) {
                 hall_line_zero_set((int16_t)rs485_get_u16(in));
-            } else {
-                hall_line_zero_capture();
+            } else if(0U == hall_line_zero_capture()) {
+                status = RS485_ERR_STATE;
+                break;
             }
             if(0 != rs485_cfg_save()) {
                 hall_line_zero_set(old_zero);
@@ -795,8 +796,9 @@ static uint8_t rs485_handle(const uint8_t *frame)
                 break;
             }
             hall_encoder_zero_set(period);
-        } else {
-            hall_encoder_zero_capture();
+        } else if(0U == hall_encoder_zero_capture()) {
+            status = RS485_ERR_STATE;
+            break;
         }
         if(0 != rs485_cfg_save()) {
             hall_encoder_zero_set(zero);

@@ -1,6 +1,6 @@
 /*!
     \file    hall_line.c
-    \brief   直线霍尔阵列的基线、零点和重心定位
+    \brief   直线霍尔阵列的基线、零点和分段对数比值定位
 */
 
 #include "hall_line.h"
@@ -9,12 +9,13 @@
 
 #define HALL_LINE_COUNT             3
 #define HALL_LINE_BASE_DEFAULT      2048
-/*! 磁铁已经离开时，基线跟上该路空载的时间常数 */
-#define HALL_LINE_TRACK_FAST_MS     1000U
-/*! 这一路正是最低的时候，可能是磁铁压着，只允许很慢地改基线 */
-#define HALL_LINE_TRACK_SLOW_MS     120000U
-/*! 三路彼此差这么多以内，认为磁铁不在阵列上 */
-#define HALL_LINE_TRACK_QUIET       40
+/*! 只跟温漂，时间常数取长一些 */
+#define HALL_LINE_TRACK_MS          10000U
+/*! 三路都离自己的基线这么近，才认为磁铁不在阵列上 */
+#define HALL_LINE_TRACK_QUIET       12
+/*! 对数比值里给两路各加的码数，邻路只剩噪声时不让 ln 发散 */
+#define HALL_LINE_LOG_EPS           4U
+#define HALL_LINE_LN2_Q16           45426
 #define HALL_LINE_CAL_MIN           16U
 /*! 每格 32 个码，覆盖 0..4095 */
 #define HALL_LINE_CAL_BINS          128U
@@ -23,13 +24,14 @@
 #define HALL_LINE_CAL_DECAY         2048U
 /*! 三路基线差过这么多，说明有一路一直被磁铁压着 */
 #define HALL_LINE_CAL_SPREAD        800
-/*! 只在 ±3 mm 内把过渡稍微拉开，区间外和线性重心相同 */
-#define HALL_LINE_BLEND_UM          3000
-#define HALL_LINE_BLEND_K_Q8        128
 
-/*! ADC1、ADC2、ADC3 的位置。相邻 10 mm，ADC1 到 ADC3 为 20 mm */
-static const int32_t s_pos_um[HALL_LINE_COUNT] = {
-    -HALL_LINE_PITCH_UM, 0, HALL_LINE_PITCH_UM
+/*! log2(1 + i/32) 的 Q16，最后一项是 65536，所以用 32 位 */
+static const uint32_t s_log2_q16[33] = {
+    0U, 2909U, 5732U, 8473U, 11136U, 13727U, 16248U, 18704U,
+    21098U, 23433U, 25711U, 27936U, 30109U, 32234U, 34312U, 36346U,
+    38336U, 40286U, 42196U, 44068U, 45904U, 47705U, 49472U, 51207U,
+    52911U, 54584U, 56229U, 57845U, 59434U, 60997U, 62534U, 64047U,
+    65536U
 };
 
 static int16_t s_baseline[HALL_LINE_COUNT] = {
@@ -45,9 +47,14 @@ static uint16_t s_cal_count;
 static int32_t s_track_acc[HALL_LINE_COUNT];
 static uint32_t s_track_ms;
 static uint8_t s_track_init;
+static hall_presence_t s_presence;
+static uint8_t s_sat;
+/*! 最浅一路不超过最深一路一半，说明磁场是局部的，不是均匀外磁场 */
+static uint8_t s_local;
 
 /*!
     \brief      丢掉基线跟踪的余量，避免刚装入的基线马上被拖走
+    基线一换，之前的“有磁铁”判断也作废，要按新基线重新确认。
     \param[in]  none
     \param[out] none
     \retval     none
@@ -60,12 +67,45 @@ static void hall_line_track_reset(void)
         s_track_acc[i] = 0;
     }
     s_track_init = 0U;
+    hall_presence_reset(&s_presence);
 }
 
 /*!
-    \brief      把每路基线收到它自己的空载
-    偏低的那一路只在它不是当前最低时快速跟随，这样磁铁压低的坑
-    不会被当成这颗霍尔的零点。三路已经很接近时，每一路都跟着走。
+    \brief      自然对数用的 log2，Q16
+    \param[in]  value: 正数
+    \retval     log2(value) * 65536
+*/
+static int32_t hall_line_log2_q16(uint32_t value)
+{
+    int32_t exp = 0;
+    uint32_t index;
+    uint32_t frac;
+    uint32_t base;
+    uint32_t span;
+
+    if(0U == value) {
+        return 0;
+    }
+    while(value > 65535U) {
+        value >>= 1;
+        exp++;
+    }
+    while(value < 32768U) {
+        value <<= 1;
+        exp--;
+    }
+    index = (value - 32768U) >> 10;
+    frac = (value - 32768U) & 1023U;
+    base = s_log2_q16[index];
+    span = s_log2_q16[index + 1U] - base;
+    return ((15 + exp) << 16) + (int32_t)base + (int32_t)((span * frac) >> 10);
+}
+
+/*!
+    \brief      磁铁不在阵列上时，让基线慢慢跟上温漂
+    只要有一路离基线超过 HALL_LINE_TRACK_QUIET，就认为磁铁还在，
+    基线完全不动。这样磁铁停在任何位置，读数都不会被基线拖着走。
+    还没校准时不跟，避免把 2048 和真实空载之间的差当成温漂。
     \param[in]  raw: 三路原码
     \param[out] none
     \retval     none
@@ -75,12 +115,8 @@ static void hall_line_track(const uint16_t raw[HALL_LINE_COUNT])
     uint32_t now;
     uint32_t dt;
     uint32_t i;
-    uint32_t i_min;
-    uint16_t raw_min;
-    uint16_t raw_max;
-    uint8_t quiet;
 
-    if(0U != s_cal_run) {
+    if((0U != s_cal_run) || (0U == s_valid)) {
         return;
     }
     now = systick_get_ms();
@@ -98,79 +134,61 @@ static void hall_line_track(const uint16_t raw[HALL_LINE_COUNT])
     }
     s_track_ms = now;
 
-    i_min = 0U;
-    raw_min = raw[0];
-    raw_max = raw[0];
-    for(i = 1U; i < HALL_LINE_COUNT; i++) {
-        if(raw[i] < raw_min) {
-            raw_min = raw[i];
-            i_min = i;
-        }
-        if(raw[i] > raw_max) {
-            raw_max = raw[i];
-        }
-    }
-    quiet = ((uint16_t)(raw_max - raw_min) <= HALL_LINE_TRACK_QUIET) ? 1U : 0U;
-
     for(i = 0U; i < HALL_LINE_COUNT; i++) {
         int32_t err = (int32_t)raw[i] - (int32_t)s_baseline[i];
-        uint32_t tau = HALL_LINE_TRACK_FAST_MS;
-        int32_t step;
-        int32_t next;
 
-        if((0U == quiet) && (i == i_min)) {
-            tau = HALL_LINE_TRACK_SLOW_MS;
+        if((err > HALL_LINE_TRACK_QUIET) || (err < -HALL_LINE_TRACK_QUIET)) {
+            for(i = 0U; i < HALL_LINE_COUNT; i++) {
+                s_track_acc[i] = 0;
+            }
+            return;
         }
+    }
+    for(i = 0U; i < HALL_LINE_COUNT; i++) {
+        int32_t err = (int32_t)raw[i] - (int32_t)s_baseline[i];
+        int32_t step;
+
         s_track_acc[i] += err * (int32_t)dt;
-        step = s_track_acc[i] / (int32_t)tau;
+        step = s_track_acc[i] / (int32_t)HALL_LINE_TRACK_MS;
         if(0 == step) {
             continue;
         }
-        s_track_acc[i] -= step * (int32_t)tau;
-        next = (int32_t)s_baseline[i] + step;
-        if(next < 0) {
-            next = 0;
-        }
-        if(next > 4095) {
-            next = 4095;
-        }
-        s_baseline[i] = (int16_t)next;
-        s_valid = 1U;
+        s_track_acc[i] -= step * (int32_t)HALL_LINE_TRACK_MS;
+        s_baseline[i] = (int16_t)((int32_t)s_baseline[i] + step);
     }
 }
 
 /*!
-    \brief      ±3 mm 内略微拉开，端点和斜率在边界上与原值重合
-    \param[in]  pos_um: 线性重心，单位 µm
-    \retval     过渡后的位置，单位 µm
+    \brief      一段里两颗传感器的对数比值，得到这段内的位置
+    假设磁场沿直线近似高斯，ln(近/远) 和位置成直线关系，
+    宽度 sigma 就是这条直线的斜率，传感器正上方和中点都不会变平。
+    \param[in]  d_mid: ADC2 的下拉量
+    \param[in]  d_end: 这一段端点那一路的下拉量
+    \retval     离 ADC2 的距离，0..pitch，单位 µm
 */
-static int32_t hall_line_blend_center(int32_t pos_um)
+static int32_t hall_line_segment_um(int32_t d_mid, int32_t d_end)
 {
-    int32_t ax = pos_um;
-    int32_t span;
-    int32_t width2;
-    int64_t bump;
+    int32_t lns;
+    int32_t ln_q16;
+    uint32_t scale;
+    int32_t pos;
 
-    if(ax < 0) {
-        ax = -ax;
+    lns = hall_line_log2_q16((uint32_t)d_mid + HALL_LINE_LOG_EPS) -
+          hall_line_log2_q16((uint32_t)d_end + HALL_LINE_LOG_EPS);
+    ln_q16 = (int32_t)(((int64_t)lns * HALL_LINE_LN2_Q16) / 65536);
+    scale = ((uint32_t)s_sigma_um * (uint32_t)s_sigma_um) / (uint32_t)HALL_LINE_PITCH_UM;
+    pos = (HALL_LINE_PITCH_UM / 2) - (int32_t)(((int64_t)scale * ln_q16) / 65536);
+    if(pos < 0) {
+        pos = 0;
     }
-    if(ax >= HALL_LINE_BLEND_UM) {
-        return pos_um;
+    if(pos > HALL_LINE_PITCH_UM) {
+        pos = HALL_LINE_PITCH_UM;
     }
-    width2 = HALL_LINE_BLEND_UM * HALL_LINE_BLEND_UM;
-    span = width2 - (ax * ax);
-    bump = (int64_t)span * (int64_t)span;
-    bump /= width2;
-    bump = bump * (int64_t)ax / width2;
-    bump = bump * HALL_LINE_BLEND_K_Q8 / 256;
-    if(pos_um < 0) {
-        return pos_um - (int32_t)bump;
-    }
-    return pos_um + (int32_t)bump;
+    return pos;
 }
 
 /*!
-    \brief      用三路下拉量的重心估计磁铁位置
+    \brief      下段 ADC1–ADC2 与上段 ADC2–ADC3 分开算，再按两端下拉量拼接
     \param[in]  raw: 三路原码
     \param[out] sample: 位置写在 angle_cdeg，单位 0.01 mm
     \retval     none
@@ -178,11 +196,13 @@ static int32_t hall_line_blend_center(int32_t pos_um)
 static void hall_line_solve(const uint16_t raw[HALL_LINE_COUNT], hall_sample_t *sample)
 {
     int32_t field[HALL_LINE_COUNT];
+    int32_t dip[HALL_LINE_COUNT];
     int32_t lowest = 0;
     int32_t highest = 0;
     int32_t amp = 0;
-    int32_t sum = 0;
-    int64_t moment = 0;
+    int32_t x_lo;
+    int32_t x_hi;
+    int32_t den;
     int32_t pos_um;
     uint32_t i;
 
@@ -206,25 +226,38 @@ static void hall_line_solve(const uint16_t raw[HALL_LINE_COUNT], hall_sample_t *
             field[i] = -field[i];
         }
     }
+    lowest = field[0];
     for(i = 0U; i < HALL_LINE_COUNT; i++) {
-        int32_t dip = field[i];
-
-        if(dip < 0) {
-            dip = 0;
+        if(field[i] < lowest) {
+            lowest = field[i];
         }
-        if(dip > amp) {
-            amp = dip;
+        dip[i] = field[i];
+        if(dip[i] < 0) {
+            dip[i] = 0;
         }
-        sum += dip;
-        moment += (int64_t)s_pos_um[i] * (int64_t)dip;
+        if(dip[i] > amp) {
+            amp = dip[i];
+        }
     }
+    s_local = ((lowest * 2) <= amp) ? 1U : 0U;
     sample->amplitude = amp;
-    /*! 空载噪声的重心会在整段行程里乱跳，幅度不够时固定在机械零点。 */
-    if((sum <= 0) || (amp < HALL_AMP_WEAK)) {
+    /*! 空载噪声会把两段比值甩开，幅度不够时固定在机械零点。 */
+    if(amp < HALL_AMP_WEAK) {
         sample->angle_cdeg = -(int32_t)s_zero_cmm;
         return;
     }
-    pos_um = hall_line_blend_center((int32_t)(moment / (int64_t)sum));
+    /*! 下段只看 ADC1 和 ADC2，结果在 -10 mm 到 0。 */
+    x_lo = -hall_line_segment_um(dip[HALL_LINE_MID], dip[HALL_LINE_BOTTOM]);
+    /*! 上段只看 ADC2 和 ADC3，结果在 0 到 +10 mm。 */
+    x_hi = hall_line_segment_um(dip[HALL_LINE_MID], dip[HALL_LINE_TOP]);
+    /*! 用两端谁被压得更低来拼接，经过 ADC2 时两段在 0 处相接。 */
+    den = dip[HALL_LINE_BOTTOM] + dip[HALL_LINE_TOP];
+    if(den <= 0) {
+        pos_um = 0;
+    } else {
+        pos_um = (int32_t)(((int64_t)dip[HALL_LINE_BOTTOM] * x_lo +
+                            (int64_t)dip[HALL_LINE_TOP] * x_hi) / den);
+    }
     if(pos_um > HALL_LINE_PITCH_UM) {
         pos_um = HALL_LINE_PITCH_UM;
     } else if(pos_um < -HALL_LINE_PITCH_UM) {
@@ -458,12 +491,15 @@ int16_t hall_line_zero_get(void)
     return s_zero_cmm;
 }
 
-void hall_line_zero_capture(void)
+uint8_t hall_line_zero_capture(void)
 {
     hall_sample_t sample;
     int32_t raw_cmm;
 
     hall_line_read(&sample);
+    if(0U == s_presence.present) {
+        return 0U;
+    }
     raw_cmm = sample.angle_cdeg + (int32_t)s_zero_cmm;
     if(raw_cmm > 32767) {
         raw_cmm = 32767;
@@ -472,11 +508,15 @@ void hall_line_zero_capture(void)
         raw_cmm = -32768;
     }
     s_zero_cmm = (int16_t)raw_cmm;
+    return 1U;
 }
 
 void hall_line_read(hall_sample_t *sample)
 {
     uint16_t raw[HALL_LINE_COUNT];
+    uint8_t usable;
+    uint8_t enter;
+    uint8_t keep;
 
     hall_encoder_copy_raw(raw);
     if(0U != s_cal_run) {
@@ -484,6 +524,14 @@ void hall_line_read(hall_sample_t *sample)
     }
     hall_line_track(raw);
     hall_line_solve(raw, sample);
+    s_sat = hall_raw_saturated(raw);
+    usable = ((0U != s_valid) && (0U == s_sat) && (0U != s_local)) ? 1U : 0U;
+    enter = ((0U != usable) && (sample->amplitude >= HALL_LINE_MAG_ON)) ? 1U : 0U;
+    keep = ((0U != usable) && (sample->amplitude >= HALL_LINE_MAG_OFF)) ? 1U : 0U;
+    if(0U == hall_presence_update(&s_presence, enter, keep)) {
+        sample->angle_cdeg = HALL_NO_MAGNET;
+        s_out = 0U;
+    }
 }
 
 uint8_t hall_line_flags(const hall_sample_t *sample)
@@ -501,6 +549,12 @@ uint8_t hall_line_flags(const hall_sample_t *sample)
     }
     if(0U != s_out) {
         flags |= HALL_FLAG_OUT;
+    }
+    if(0U != s_presence.present) {
+        flags |= HALL_FLAG_MAGNET;
+    }
+    if(0U != s_sat) {
+        flags |= HALL_FLAG_SAT;
     }
     return flags;
 }

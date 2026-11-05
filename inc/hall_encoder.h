@@ -38,15 +38,69 @@
 #define HALL_FLAG_CAL_VALID         0x02U
 #define HALL_FLAG_CAL_RUN           0x04U
 #define HALL_FLAG_OUT               0x08U
+/*! 已确认有磁铁，angle_cdeg 是真实角度或位置 */
+#define HALL_FLAG_MAGNET            0x10U
+/*! 有一路贴近 ADC 的 0 或满量程，磁铁太近，读数不可信 */
+#define HALL_FLAG_SAT               0x20U
+
+/*! 没有确认磁铁时 angle_cdeg 固定为这个值，不会和任何真实读数混淆 */
+#define HALL_NO_MAGNET              (-2147483647 - 1)
+
+/*!
+    判断有磁铁的条件：
+      - 三路都不贴近 0 或 4095；
+      - 幅度先连续 HALL_MAG_ON_MS 不低于进入门限，才认为有磁铁；
+      - 之后只要连续 HALL_MAG_OFF_MS 低于退出门限，立刻认为没有。
+    进入慢、退出快，宁可短暂不出数，也不在没有磁铁时给出角度或位置。
+*/
+#define HALL_MAG_ON_MS              100U
+#define HALL_MAG_OFF_MS             5U
+#define HALL_RAW_SAT_LO             32U
+#define HALL_RAW_SAT_HI             4063U
+/*! 角度模式门限，单位 ADC 计数。未校准时三路偏置差会造成约 110 的假幅度 */
+#define HALL_ENC_MAG_ON             400
+#define HALL_ENC_MAG_OFF            250
 
 /*!
     \brief      一次采样结果
 */
 typedef struct {
     uint16_t raw[3];       /*!< U1、U2、U4 的 12 位 ADC 原码 */
-    int32_t angle_cdeg;    /*!< 0..35999，单位 0.01°，已减去机械零点 */
+    int32_t angle_cdeg;    /*!< 0..35999，单位 0.01°，已减去机械零点；没有磁铁时为 HALL_NO_MAGNET */
     int32_t amplitude;     /*!< 单路交流峰值，单位 ADC 计数 */
 } hall_sample_t;
+
+/*!
+    \brief      有无磁铁的去抖状态
+*/
+typedef struct {
+    uint32_t since_ms;     /*!< 当前这种不一致状态开始的时刻 */
+    uint8_t timing;        /*!< since_ms 是否有效 */
+    uint8_t present;       /*!< 1 表示已确认有磁铁 */
+} hall_presence_t;
+
+/*!
+    \brief      按进入、保持条件更新有无磁铁
+    \param[in]  p: 去抖状态
+    \param[in]  enter: 本次满足进入门限
+    \param[in]  keep: 本次满足保持门限
+    \retval     1 有磁铁，0 没有
+*/
+uint8_t hall_presence_update(hall_presence_t *p, uint8_t enter, uint8_t keep);
+
+/*!
+    \brief      回到“没有磁铁”，重新计时
+    \param[in]  p: 去抖状态
+    \retval     none
+*/
+void hall_presence_reset(hall_presence_t *p);
+
+/*!
+    \brief      三路中有没有贴近 0 或满量程的
+    \param[in]  raw: 三路原码
+    \retval     1 饱和，0 正常
+*/
+uint8_t hall_raw_saturated(const uint16_t raw[3]);
 
 /*!
     \brief      三路偏置和相对增益
@@ -81,7 +135,7 @@ void hall_encoder_read(hall_sample_t *sample);
 void hall_encoder_copy_raw(uint16_t raw[3]);
 
 /*!
-    \brief      弱磁、校准有效、正在校准
+    \brief      弱磁、校准有效、正在校准、有磁铁、饱和
     \param[in]  sample: 最近一次解算
     \retval     HALL_FLAG_* 的组合
 */
@@ -146,8 +200,8 @@ uint16_t hall_encoder_zero_get(void);
     \brief      把此刻的角度记成 0°
     \param[in]  none
     \param[out] none
-    \retval     none
+    \retval     1 成功，0 没有确认磁铁，零点不变
 */
-void hall_encoder_zero_capture(void);
+uint8_t hall_encoder_zero_capture(void);
 
 #endif /* HALL_ENCODER_H */

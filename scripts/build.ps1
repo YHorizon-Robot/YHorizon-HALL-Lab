@@ -1,13 +1,13 @@
 # Build Hall_Senser on Windows (CMake + Ninja, GD32EB ARM GCC).
 # Usage:
 #   .\scripts\build.ps1
-#   .\scripts\build.ps1 -Preset release
+#   .\scripts\build.ps1 -Preset debug
 #   .\scripts\build.ps1 -Flash
 
 [CmdletBinding()]
 param(
     [ValidateSet('debug', 'release')]
-    [string]$Preset = 'debug',
+    [string]$Preset = 'release',
 
     [switch]$Flash
 )
