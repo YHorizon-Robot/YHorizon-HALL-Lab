@@ -24,30 +24,33 @@ project(${CMAKE_PROJECT_NAME} C ASM)
 
 add_executable(${CMAKE_PROJECT_NAME})
 
-set(GD32_CMSIS "${CMAKE_CURRENT_SOURCE_DIR}/Firmware/CMSIS")
-set(GD32_SPL   "${CMAKE_CURRENT_SOURCE_DIR}/Firmware/GD32E23x_standard_peripheral")
+set(GD32_CMSIS "${CMAKE_CURRENT_SOURCE_DIR}/Drivers/CMSIS")
+set(GD32_SPL   "${CMAKE_CURRENT_SOURCE_DIR}/Drivers/GD32E23x_standard_peripheral")
 
-# New src/*.c and SPL drivers are picked up on the next build (Ninja/Make).
 file(GLOB HALL_APP_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/App/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Hall/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Port/gd32e23x/*.c"
 )
 file(GLOB HALL_SPL_SOURCES CONFIGURE_DEPENDS
     "${GD32_SPL}/Source/*.c"
 )
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    gcc_startup/startup_gd32e23x.S
+    Port/gd32e23x/startup_gd32e23x.S
     ${GD32_CMSIS}/GD/GD32E23x/Source/system_gd32e23x.c
     ${GD32_CMSIS}/GD/GD32E23x/Source/syscalls.c
     ${HALL_SPL_SOURCES}
     ${HALL_APP_SOURCES}
-    RTT/SEGGER_RTT.c
-    RTT/SEGGER_RTT_printf.c
+    Hw/RTT/SEGGER_RTT.c
+    Hw/RTT/SEGGER_RTT_printf.c
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    inc
-    RTT
+    App
+    Hall
+    Port/gd32e23x
+    Hw/RTT
     ${GD32_CMSIS}
     ${GD32_CMSIS}/GD/GD32E23x/Include
     ${GD32_SPL}/Include
@@ -59,9 +62,9 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     USE_STDPERIPH_DRIVER
 )
 
-set_source_files_properties(gcc_startup/startup_gd32e23x.S PROPERTIES LANGUAGE ASM)
+set_source_files_properties(Port/gd32e23x/startup_gd32e23x.S PROPERTIES LANGUAGE ASM)
 
-file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ldscripts/gd32e23x_flash.ld" HALL_LINKER_SCRIPT)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/Port/gd32e23x/gd32e23x_flash.ld" HALL_LINKER_SCRIPT)
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     -T "${HALL_LINKER_SCRIPT}"
     "LINKER:-Map=$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.map"
@@ -88,7 +91,7 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
 # cmake --build --preset debug --target flash
 add_custom_target(flash
     COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-            -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flash.ps1"
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/../tools/flash.ps1"
             -ElfFile "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>"
     DEPENDS ${CMAKE_PROJECT_NAME}
     USES_TERMINAL

@@ -1,6 +1,7 @@
 {
+    "cmake.sourceDirectory": "${workspaceFolder}/firmware",
     "cmake.useCMakePresets": "always",
     "cmake.configurePreset": "debug",
     "cmake.buildPreset": "debug",
-    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json"
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/firmware/build/debug/compile_commands.json"
 }

@@ -140,7 +140,7 @@ if(CMAKE_MAKE_PROGRAM)
     message(STATUS "Ninja:   ${CMAKE_MAKE_PROGRAM}")
 endif()
 
-# GD32E230G6: Cortex-M23, no FPU. Match gcc_startup/startup_gd32e23x.S (.fpu softvfp).
+# GD32E230G6: Cortex-M23, no FPU. Match Port/gd32e23x/startup_gd32e23x.S (.fpu softvfp).
 set(TARGET_FLAGS "-mcpu=cortex-m23 -mthumb -mfloat-abi=soft")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TARGET_FLAGS}")

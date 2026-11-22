@@ -23,20 +23,22 @@ GD32E230 · 三路线性霍尔 · RS485
 
 0.01 mm / 0.01° 是协议编码单位，实际精度以测量为准。主页上的曲线是理想示意，范围不是已验证的传感量程。
 
-## 仓库里有什么
+## 仓库结构
 
-```text
-src/  inc/          应用：三路采样、直线/角度解算、RS485 协议
-Firmware/          GD32E23x CMSIS 与标准外设库
-gcc_startup/       启动文件
-ldscripts/         链接脚本，GD32E230G6U6TR，31 KB Flash / 6 KB RAM
-cmake/  CMakeLists.txt  CMakePresets.json
-scripts/           Windows 下的编译与 OpenOCD 烧录
-host/              Python 图形上位机
-hardware/          HallPos、Encoder 原理图与 PCB PDF，以及 EDA 工程
-mechanical/        HALLPOS、ENCODER 测试结构 STEP
-hall.csv           采样记录
-```
+| 目录 | 内容 |
+| --- | --- |
+| `firmware/App/` | 主程序、SysTick、中断和 RS485 协议 |
+| `firmware/Hall/` | 三路采样、直线位置和角度解算 |
+| `firmware/Port/gd32e23x/` | 启动文件、链接脚本、评估板和库选项 |
+| `firmware/Drivers/` | GD32E23x CMSIS 与标准外设库 |
+| `firmware/Hw/RTT/` | SEGGER RTT |
+| `hardware/easyeda/` | 嘉立创 EDA Pro 源工程 |
+| `hardware/schematic/` | HallPos、Encoder 原理图 PDF |
+| `hardware/pcb/` | 两块 PCB 的 PDF |
+| `mechanical/models/` | HALLPOS、ENCODER 测试结构 STEP |
+| `host/` | Python 图形上位机 |
+| `tools/` | Windows 下的编译与 OpenOCD 烧录 |
+| `docs/hall.csv` | 采样记录 |
 
 更完整的课程、动画和复刻步骤在项目主页，不在这个固件仓库里重复展开：
 
@@ -48,7 +50,7 @@ hall.csv           采样记录
 - [协议参考](https://ywtai3d.cn/sensor/wiki/Protocol-Reference.html)
 - [上位机](https://ywtai3d.cn/sensor/wiki/Host-Tools.html)
 
-原理图和 PCB PDF 用来读电路和安装。嘉立创打板还需要 Gerber、钻孔等制造文件，步骤见 [打板说明](https://ywtai3d.cn/sensor/wiki/PCB-Ordering.html)。测试夹具可按 `mechanical/` 里的 STEP 打印。另备一块 USB 转 RS485 模块；USB-TTL 的 TX/RX 不能接到总线 A/B 上。
+原理图和 PCB PDF 用来读电路和安装。嘉立创打板还需要 Gerber、钻孔等制造文件，步骤见 [打板说明](https://ywtai3d.cn/sensor/wiki/PCB-Ordering.html)。测试夹具可按 `mechanical/models/` 里的 STEP 打印。另备一块 USB 转 RS485 模块；USB-TTL 的 TX/RX 不能接到总线 A/B 上。
 
 ## 电路要点
 
@@ -71,26 +73,26 @@ MCU 为 `GD32E230G6U6TR`。三颗霍尔 `SC4703SO-TR` 输出模拟电压，经 A
 在 Windows PowerShell 中，于仓库根目录执行。需要 CMake 3.22+、Ninja、`arm-none-eabi-gcc`，烧录还需要带 GD32E23x 支持的 OpenOCD 和 CMSIS-DAP。脚本会查找本机 GD32 Embedded Builder 自带的 ARM GCC。
 
 ```powershell
-.\scripts\build.ps1
-.\scripts\build.ps1 -Preset debug
-.\scripts\build.ps1 -Flash
+.\tools\build.ps1
+.\tools\build.ps1 -Preset debug
+.\tools\build.ps1 -Flash
 ```
 
-默认预设是 `release`（`-Os -g`）。`debug` 为 `-O0 -g3`。产物在 `build/release/` 或 `build/debug/`：
+默认预设是 `release`（`-Os -g`）。`debug` 为 `-O0 -g3`。产物在 `firmware/build/release/` 或 `firmware/build/debug/`：
 
 - `Hall_Senser.elf`：烧录和调试用这个
 - `Hall_Senser.bin`：起始地址 `0x08000000`
 - `Hall_Senser.hex`
 - `Hall_Senser.map`
 
-工具已在 PATH 中时也可以：
+工具已在 PATH 中时，也可以进入 `firmware/` 后执行：
 
 ```powershell
 cmake --preset release
 cmake --build --preset release
 ```
 
-SWD 只负责下载。读数走 RS485，和烧录是两条线。第一次先只接一块板。烧录细节见 [编译与烧录](https://ywtai3d.cn/sensor/wiki/Build-and-Flash.html)；本仓库的脚本就在根目录的 `scripts/`，不必再进入 `software/firmware`。
+SWD 只负责下载。读数走 RS485，和烧录是两条线。第一次先只接一块板。烧录细节见 [编译与烧录](https://ywtai3d.cn/sensor/wiki/Build-and-Flash.html)。本仓库的脚本在根目录 `tools/`，CMake 工程在 `firmware/`。
 
 ## 上位机
 
@@ -119,8 +121,8 @@ python -m venv .venv
 | `0x23` / `0x24` / `0x25` | 开始、结束、清除校准 |
 | `0x06` | 恢复出厂：设备号 1，115200，轮询，角度模式 |
 
-没有确认磁铁时，位置整数固定为 `0x80000000`，标志 bit4 为 0。此时幅度和三路原码仍可观察，不要当成位置。完整帧格式、状态码和标志位在 `inc/rs485_proto.h`，讲解见 [协议参考](https://ywtai3d.cn/sensor/wiki/Protocol-Reference.html)。
+没有确认磁铁时，位置整数固定为 `0x80000000`，标志 bit4 为 0。此时幅度和三路原码仍可观察，不要当成位置。完整帧格式、状态码和标志位在 `firmware/App/rs485_proto.h`，讲解见 [协议参考](https://ywtai3d.cn/sensor/wiki/Protocol-Reference.html)。
 
 ## 许可
 
-`Firmware/` 中的 CMSIS 与 GD32 标准外设库版权归 GigaDevice，条款见 `Firmware/CMSIS/LICENSE.TXT`。应用代码、图纸和机械模型的开源许可以仓库后续补充的声明为准。
+`firmware/Drivers/` 中的 CMSIS 与 GD32 标准外设库版权归 GigaDevice，条款见 `firmware/Drivers/CMSIS/LICENSE.TXT`。应用代码、图纸和机械模型的开源许可以仓库后续补充的声明为准。

@@ -1,8 +1,8 @@
 # Build Hall_Senser on Windows (CMake + Ninja, GD32EB ARM GCC).
 # Usage:
-#   .\scripts\build.ps1
-#   .\scripts\build.ps1 -Preset debug
-#   .\scripts\build.ps1 -Flash
+#   .\tools\build.ps1
+#   .\tools\build.ps1 -Preset debug
+#   .\tools\build.ps1 -Flash
 
 [CmdletBinding()]
 param(
@@ -13,7 +13,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = Split-Path -Parent $PSScriptRoot
+$Repo = Split-Path -Parent $PSScriptRoot
+$Firmware = Join-Path $Repo 'firmware'
 
 function Get-FirstExisting {
     param([string[]]$Paths)
@@ -46,13 +47,13 @@ if (-not $cmake) {
 }
 Write-Host "cmake: $cmake"
 
-Push-Location $Root
+Push-Location $Firmware
 try {
     & $cmake --preset $Preset
     if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
     & $cmake --build --preset $Preset
     if ($LASTEXITCODE -ne 0) { throw "cmake build failed ($LASTEXITCODE)" }
-    Write-Host "OK: $Root\build\$Preset\Hall_Senser.elf"
+    Write-Host "OK: $Firmware\build\$Preset\Hall_Senser.elf"
 }
 finally {
     Pop-Location

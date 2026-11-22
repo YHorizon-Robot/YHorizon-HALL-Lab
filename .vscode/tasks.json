@@ -10,7 +10,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/scripts/build.ps1",
+                "${workspaceFolder}/tools/build.ps1",
                 "-Preset",
                 "debug"
             ],
@@ -29,7 +29,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/scripts/build.ps1",
+                "${workspaceFolder}/tools/build.ps1",
                 "-Preset",
                 "release"
             ],
@@ -44,7 +44,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/scripts/flash.ps1",
+                "${workspaceFolder}/tools/flash.ps1",
                 "-Preset",
                 "debug",
                 "-BuildBeforeFlash"
@@ -60,7 +60,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/scripts/flash.ps1",
+                "${workspaceFolder}/tools/flash.ps1",
                 "-Preset",
                 "release",
                 "-BuildBeforeFlash"

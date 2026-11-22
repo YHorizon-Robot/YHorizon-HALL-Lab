@@ -1,12 +1,12 @@
 ﻿# Flash Hall_Senser onto GD32E230G6 with OpenOCD (CMSIS-DAP / SWD).
 # Prefer GigaDevice OpenOCD (`gd32e23x`). xPack/stock OpenOCD uses
-# scripts/openocd-gd32e230-stm32f1x.cfg (32 KB, no mass_erase).
+# tools/openocd-gd32e230-stm32f1x.cfg (32 KB, no mass_erase).
 # Usage:
-#   .\scripts\flash.ps1
-#   .\scripts\flash.ps1 -BuildBeforeFlash
-#   .\scripts\flash.ps1 -Preset debug
-#   .\scripts\flash.ps1 -ElfFile 'D:\path\Hall_Senser.elf'
-#   .\scripts\flash.ps1 -EraseConfig
+#   .\tools\flash.ps1
+#   .\tools\flash.ps1 -BuildBeforeFlash
+#   .\tools\flash.ps1 -Preset debug
+#   .\tools\flash.ps1 -ElfFile 'D:\path\Hall_Senser.elf'
+#   .\tools\flash.ps1 -EraseConfig
 # -EraseConfig 只擦最后 1 KB（0x08007C00）里的设备号、模式、基线和宽度，
 # 程序本身照常烧录。擦完上电回到角度编码器、设备号 1、115200。
 
@@ -27,7 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Root = Split-Path -Parent $PSScriptRoot
+$Repo = Split-Path -Parent $PSScriptRoot
 
 function Invoke-Native {
     param(
@@ -142,7 +142,7 @@ if ($ConfigFile -eq '') {
 }
 
 if ($ElfFile -eq '') {
-    $ElfFile = Join-Path $Root "build\$Preset\Hall_Senser.elf"
+    $ElfFile = Join-Path $Repo "firmware\build\$Preset\Hall_Senser.elf"
 }
 
 if ($BuildBeforeFlash) {
@@ -166,7 +166,7 @@ if (-not (Test-Path -LiteralPath $ConfigFile)) {
     throw "OpenOCD config not found: $ConfigFile"
 }
 if (-not (Test-Path -LiteralPath $ElfFile)) {
-    throw "ELF file not found: $ElfFile. Run .\scripts\build.ps1 -Preset $Preset first."
+    throw "ELF file not found: $ElfFile. Run .\tools\build.ps1 -Preset $Preset first."
 }
 
 $resolvedElf = (Resolve-Path -LiteralPath $ElfFile).Path
