@@ -1,12 +1,12 @@
-# 元驭 Hall Lab
+# YHorizon Hall Lab
 
 霍尔传感器，从直线到旋转。
 
 两种 PCB，一套采样与通信。板卡固定，磁铁移动：直线版读位移，旋转版读单圈角度。从接线、读数到校准，可以边做边看懂位置反馈。
 
-**项目主页：** <https://ywtai3d.cn/sensor/index.html>
+**项目主页：** <https://yhorizon.tech/sensor/index.html>
 
-主页上可以拖动磁体看三路信号，打开直线和旋转的三维模型，并进入原理、打板、实验和协议说明。教学 Wiki 从 [学习路线](https://ywtai3d.cn/sensor/wiki/Home.html) 开始。
+主页上可以拖动磁体看三路信号，打开直线和旋转的三维模型，并进入原理、打板、实验和协议说明。教学 Wiki 从 [学习路线](https://yhorizon.tech/sensor/wiki/Home.html) 开始。
 
 GD32E230 · 三路线性霍尔 · RS485
 
@@ -42,15 +42,15 @@ GD32E230 · 三路线性霍尔 · RS485
 
 更完整的课程、动画和复刻步骤在项目主页，不在这个固件仓库里重复展开：
 
-- [学习路线](https://ywtai3d.cn/sensor/wiki/Learning-Path.html)
-- [八个实验](https://ywtai3d.cn/sensor/wiki/Labs.html)
-- [硬件接线](https://ywtai3d.cn/sensor/wiki/Hardware-Guide.html)
-- [PCB 与机械](https://ywtai3d.cn/sensor/wiki/PCB-and-Mechanics.html)
-- [校准与测量](https://ywtai3d.cn/sensor/wiki/Calibration-and-Measurement.html)
-- [协议参考](https://ywtai3d.cn/sensor/wiki/Protocol-Reference.html)
-- [上位机](https://ywtai3d.cn/sensor/wiki/Host-Tools.html)
+- [学习路线](https://yhorizon.tech/sensor/wiki/Learning-Path.html)
+- [八个实验](https://yhorizon.tech/sensor/wiki/Labs.html)
+- [硬件接线](https://yhorizon.tech/sensor/wiki/Hardware-Guide.html)
+- [PCB 与机械](https://yhorizon.tech/sensor/wiki/PCB-and-Mechanics.html)
+- [校准与测量](https://yhorizon.tech/sensor/wiki/Calibration-and-Measurement.html)
+- [协议参考](https://yhorizon.tech/sensor/wiki/Protocol-Reference.html)
+- [上位机](https://yhorizon.tech/sensor/wiki/Host-Tools.html)
 
-原理图和 PCB PDF 用来读电路和安装。嘉立创打板还需要 Gerber、钻孔等制造文件，步骤见 [打板说明](https://ywtai3d.cn/sensor/wiki/PCB-Ordering.html)。测试夹具可按 `mechanical/models/` 里的 STEP 打印。另备一块 USB 转 RS485 模块；USB-TTL 的 TX/RX 不能接到总线 A/B 上。
+原理图和 PCB PDF 用来读电路和安装。嘉立创打板还需要 Gerber、钻孔等制造文件，步骤见 [打板说明](https://yhorizon.tech/sensor/wiki/PCB-Ordering.html)。测试夹具可按 `mechanical/models/` 里的 STEP 打印。另备一块 USB 转 RS485 模块；USB-TTL 的 TX/RX 不能接到总线 A/B 上。
 
 ## 电路要点
 
@@ -92,7 +92,7 @@ cmake --preset release
 cmake --build --preset release
 ```
 
-SWD 只负责下载。读数走 RS485，和烧录是两条线。第一次先只接一块板。烧录细节见 [编译与烧录](https://ywtai3d.cn/sensor/wiki/Build-and-Flash.html)。本仓库的脚本在根目录 `tools/`，CMake 工程在 `firmware/`。
+SWD 只负责下载。读数走 RS485，和烧录是两条线。第一次先只接一块板。烧录细节见 [编译与烧录](https://yhorizon.tech/sensor/wiki/Build-and-Flash.html)。本仓库的脚本在根目录 `tools/`，CMake 工程在 `firmware/`。
 
 ## 上位机
 
@@ -121,7 +121,7 @@ python -m venv .venv
 | `0x23` / `0x24` / `0x25` | 开始、结束、清除校准 |
 | `0x06` | 恢复出厂：设备号 1，115200，轮询，角度模式 |
 
-没有确认磁铁时，位置整数固定为 `0x80000000`，标志 bit4 为 0。此时幅度和三路原码仍可观察，不要当成位置。完整帧格式、状态码和标志位在 `firmware/App/rs485_proto.h`，讲解见 [协议参考](https://ywtai3d.cn/sensor/wiki/Protocol-Reference.html)。
+没有确认磁铁时，位置整数固定为 `0x80000000`，标志 bit4 为 0。此时幅度和三路原码仍可观察，不要当成位置。完整帧格式、状态码和标志位在 `firmware/App/rs485_proto.h`，讲解见 [协议参考](https://yhorizon.tech/sensor/wiki/Protocol-Reference.html)。
 
 ## 许可
 
